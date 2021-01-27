@@ -4,8 +4,10 @@ import pickle
 import time
 from collections import OrderedDict
 from multiprocessing import Pool
+from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.utils.data as data
 import torchvision.transforms as transforms
@@ -81,6 +83,53 @@ def get_paths(config):
         ids = {'train': None, 'val': None, 'test': None}
 
     return roots, ids
+
+
+class WICSMMIRDataset(data.Dataset):
+    """
+    WICSMMIR dataset compatible with torch.utils.data.DataLoader.
+    (WIkiCaps Subset for Multi-Modal Information Retrieval)
+    """
+
+    def __init__(self,
+                 features_root: str,
+                 dataset_file: str,
+                 shuffle: bool = True,
+                 random_seed: int = 1312):
+        self.features_root = Path(features_root)
+        assert self.features_root.exists()
+
+        self.captions = pd.read_feather(dataset_file, use_threads=True, columns=['wikicaps_id', 'caption'])
+        if shuffle:
+            self.captions = self.captions.sample(frac=1, random_state=random_seed)
+
+    def _get_feature_file_path(self, wikicaps_id):
+        f = self.features_root.joinpath(f'wikicaps_{wikicaps_id}.npz')
+        assert f.exists()
+        return str(f)
+
+    def _load_features(self, wikicaps_id):
+        feat_npz = np.load(self._get_feature_file_path(wikicaps_id), allow_pickle=True)
+        bua_feats = feat_npz['x']  # shape: (36, 2048)
+        bua_bboxes = feat_npz['bbox']  # shape: (36, 4)
+        img_size = (feat_npz['image_w'], feat_npz['image_h'])  # Tuple[int, int]
+
+        # normalize box (see BottomUpFeaturesDataset)
+        bua_bboxes = bua_bboxes / np.tile(img_size, 2)
+
+        bua_feats = torch.Tensor(bua_feats)
+        bua_bboxes = torch.Tensor(bua_bboxes)
+
+        return bua_feats, bua_bboxes
+
+    def __getitem__(self, ds_idx):
+        wikicaps_id, caption = self.captions.iloc[ds_idx, 0:2]
+        bua_feats, bua_bboxes = self._load_features(wikicaps_id)
+
+        return bua_feats, bua_bboxes, caption, ds_idx, wikicaps_id
+
+    def __len__(self):
+        return int(len(self.captions))
 
 
 class CocoDataset(data.Dataset):
@@ -601,7 +650,7 @@ class Collate:
             return img_features, targets, feat_lengths, cap_lengths, out_boxes, ids
 
 
-def get_loader_single(data_name, split, imgs_root, captions_json, transform, pre_extracted_root=None,
+def get_loader_single(data_name, split, imgs_root=None, captions_json=None, transform=None, pre_extracted_root=None,
                       batch_size=100, shuffle=True,
                       num_workers=2, ids=None, collate_fn=None, **kwargs):
     """Returns torch.utils.data.DataLoader for custom coco dataset."""
@@ -627,6 +676,23 @@ def get_loader_single(data_name, split, imgs_root, captions_json, transform, pre
                                     split=split,
                                     json=captions_json,
                                     transform=transform)
+    elif 'wicsmmir' in data_name:
+        config = kwargs['config']
+        train_set_file = config['dataset']['train_set']
+        test_set_file = config['dataset']['test_set']
+        features_root = config['dataset']['features_root']
+        random_seed = config['dataset']['random_seed']
+
+        if 'train' in split:
+            dataset = WICSMMIRDataset(features_root,
+                                      train_set_file,
+                                      shuffle,
+                                      random_seed)
+        elif 'test' in split:
+            dataset = WICSMMIRDataset(features_root,
+                                      test_set_file,
+                                      shuffle,
+                                      random_seed)
 
     # Data loader
     data_loader = torch.utils.data.DataLoader(dataset=dataset,
@@ -660,30 +726,49 @@ def get_loaders(config, workers, batch_size=None):
     if batch_size is None:
         batch_size = config['training']['bs']
     collate_fn = Collate(config)
-    roots, ids = get_paths(config)
 
     transform = get_transform(data_name, 'train', config)
     preextracted_root = config['image-model']['pre-extracted-features-root'] \
         if 'pre-extracted-features-root' in config['image-model'] else None
+    if data_name == 'wicsmmir':
+        train_loader = get_loader_single(data_name,
+                                         split='train',
+                                         transform=transform,
+                                         batch_size=batch_size,
+                                         shuffle=False,
+                                         num_workers=workers,
+                                         collate_fn=collate_fn,
+                                         config=config)
 
-    train_loader = get_loader_single(data_name, 'train',
-                                     roots['train']['img'],
-                                     roots['train']['cap'],
-                                     transform, ids=ids['train'],
-                                     pre_extracted_root=preextracted_root,
-                                     batch_size=batch_size, shuffle=True,
-                                     num_workers=workers,
-                                     collate_fn=collate_fn, config=config)
+        val_loader = get_loader_single(data_name,
+                                       split='test',
+                                       transform=transform,
+                                       batch_size=batch_size,
+                                       shuffle=False,
+                                       num_workers=workers,
+                                       collate_fn=collate_fn,
+                                       config=config)
 
-    transform = get_transform(data_name, 'val', config)
-    val_loader = get_loader_single(data_name, 'val',
-                                   roots['val']['img'],
-                                   roots['val']['cap'],
-                                   transform, ids=ids['val'],
-                                   pre_extracted_root=preextracted_root,
-                                   batch_size=batch_size, shuffle=False,
-                                   num_workers=workers,
-                                   collate_fn=collate_fn, config=config)
+    else:  # coco and flickr
+        roots, ids = get_paths(config)
+        train_loader = get_loader_single(data_name, 'train',
+                                         roots['train']['img'],
+                                         roots['train']['cap'],
+                                         transform, ids=ids['train'],
+                                         pre_extracted_root=preextracted_root,
+                                         batch_size=batch_size, shuffle=True,
+                                         num_workers=workers,
+                                         collate_fn=collate_fn, config=config)
+
+        transform = get_transform(data_name, 'val', config)
+        val_loader = get_loader_single(data_name, 'val',
+                                       roots['val']['img'],
+                                       roots['val']['cap'],
+                                       transform, ids=ids['val'],
+                                       pre_extracted_root=preextracted_root,
+                                       batch_size=batch_size, shuffle=False,
+                                       num_workers=workers,
+                                       collate_fn=collate_fn, config=config)
 
     return train_loader, val_loader
 

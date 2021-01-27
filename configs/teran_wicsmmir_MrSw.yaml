@@ -1,0 +1,53 @@
+dataset:
+  name: 'wicsmmir'
+  train_set: 'data/wikicaps/train_set_v1.df.feather'
+  test_set: 'data/wikicaps/test_set_v1.df.feather'
+  features_root: 'data/wicsmmir/features_36'
+  random_seed: 1312
+  pre-extracted-features: False  # this doesn't mean the pre-extracted-features from BUA... (name makes no so much sense..)
+
+text-model:
+  name: 'bert'
+  pretrain: 'bert-base-uncased'
+  word-dim: 768
+  extraction-hidden-layer: 6
+  fine-tune: True
+  pre-extracted: False
+  layers: 0
+  dropout: 0.1
+
+image-model:
+  name: 'bottomup'
+  pre-extracted-features-root: 'data/wikicaps/features_36'
+  transformer-layers: 4
+  dropout: 0.1
+  pos-encoding: 'concat-and-process'
+  crop-size: 224  # not used
+  fine-tune: False
+  feat-dim: 2048
+  norm: True
+
+model:
+  name: 'teran'
+  embed-size: 1024
+  text-aggregation: 'first'
+  image-aggregation: 'first'
+  layers: 2
+  exclude-stopwords: False
+  shared-transformer: False
+  dropout: 0.1
+
+training:
+  lr: 0.00001  # 0.000006
+  grad-clip: 2.0
+  max-violation: True
+  loss-type: 'alignment'
+  alignment-mode: 'MrSw'
+  measure: 'dot'
+  margin: 0.2
+  bs: 25
+  scheduler: 'steplr'
+  gamma: 0.1
+  step-size: 20
+  warmup: null
+  warmup-period: 1000
