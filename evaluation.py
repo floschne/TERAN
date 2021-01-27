@@ -327,6 +327,16 @@ def i2t(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=Fals
         # Score
         rank = 1e20
         for i in range(num_captions_per_image * index, num_captions_per_image * index + num_captions_per_image, 1):
+            w = numpy.where(inds == i)
+            if isinstance(w, tuple) and isinstance(w[0], np.ndarray) and len(w[0]) > 0:
+                tmp = w[0][0]
+            elif isinstance(w, np.ndarray) and len(w) > 0:
+                tmp = w[0]
+            elif isinstance(w, np.int64):
+                tmp = w
+            else:
+                print(f"Strange error occurred.. w: {w} | i: {i} | inds.shape:  {inds.shape}")
+                tmp = rank
 
             if tmp < rank:
                 rank = tmp
@@ -422,6 +432,17 @@ def t2i(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=Fals
         for i in range(len(inds)):
             inds[i] = numpy.argsort(d[i])[::-1]
             # in che posizione e' l'immagine (index) che ha questa caption (num_captions_per_image*index + i)
+            w = numpy.where(inds[i] == index)
+            if isinstance(w, tuple) and isinstance(w[0], np.ndarray) and len(w[0]) > 0:
+                tmp = w[0][0]
+            elif isinstance(w, np.ndarray) and len(w) > 0:
+                tmp = w[0]
+            elif isinstance(w, np.int64):
+                tmp = w
+            else:
+                print(f"Strange error occurred.. w: {w} | i: {i} | inds.shape:  {inds.shape}")
+                tmp = 1e20
+
             ranks[num_captions_per_image * index + i] = tmp
             top50[num_captions_per_image * index + i] = inds[i][0:50]
             # calculate ndcg
