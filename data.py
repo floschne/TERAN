@@ -822,19 +822,30 @@ def get_test_loader(config, workers, split_name='test', batch_size=None):
     if batch_size is None:
         batch_size = config['training']['bs']
     collate_fn = Collate(config)
-    # Build Dataset Loader
-    roots, ids = get_paths(config)
 
     pre_extracted_root = config['image-model']['pre-extracted-features-root'] \
         if 'pre-extracted-features-root' in config['image-model'] else None
 
     transform = get_transform(data_name, split_name, config)
-    test_loader = get_loader_single(data_name, split_name,
-                                    imgs_root=roots[split_name]['img'],
-                                    captions_json=roots[split_name]['cap'],
-                                    transform=transform, ids=ids[split_name],
-                                    pre_extracted_root=pre_extracted_root,
-                                    batch_size=batch_size, shuffle=False,
-                                    num_workers=workers,
-                                    collate_fn=collate_fn, config=config)
+
+    # Build Dataset Loader
+    if data_name == 'wicsmmir':
+        test_loader = get_loader_single(data_name,
+                                        split='test',
+                                        transform=transform,
+                                        batch_size=batch_size,
+                                        shuffle=False,
+                                        num_workers=workers,
+                                        collate_fn=collate_fn,
+                                        config=config)
+    else:  # coco and flickr
+        roots, ids = get_paths(config)
+        test_loader = get_loader_single(data_name, split_name,
+                                        imgs_root=roots[split_name]['img'],
+                                        captions_json=roots[split_name]['cap'],
+                                        transform=transform, ids=ids[split_name],
+                                        pre_extracted_root=pre_extracted_root,
+                                        batch_size=batch_size, shuffle=False,
+                                        num_workers=workers,
+                                        collate_fn=collate_fn, config=config)
     return test_loader

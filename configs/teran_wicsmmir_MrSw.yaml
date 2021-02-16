@@ -1,7 +1,7 @@
 dataset:
   name: 'wicsmmir'
-  train_set: 'data/wikicaps/train_set_v1.df.feather'
-  test_set: 'data/wikicaps/test_set_v1.df.feather'
+  train_set: 'data/wicsmmir/train_set_v1.df.feather'
+  test_set: 'data/wicsmmir/test_set_v1.df.feather'
   features_root: 'data/wicsmmir/features_36'
   random_seed: 1312
   pre-extracted-features: False  # this doesn't mean the pre-extracted-features from BUA... (name makes no so much sense..)
