@@ -397,6 +397,7 @@ def t2i(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=Fals
 
     images_per_batch = ims.shape[0] // im_batches
 
+    # loop over all captions
     for index in tqdm.trange(npts):
 
         # Get query captions
@@ -424,9 +425,16 @@ def t2i(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=Fals
                 d = torch.mm(queries[:, 0, :], ims[:, 0, :].t())
                 d = d.cpu().numpy()
             else:
+                # loop over all images batch-wise and compute distances to current (the index'th) caption/query
                 for i in range(im_batches):
-                    ims_now = ims[i * images_per_batch:(i + 1) * images_per_batch]
-                    ims_len_now = ims_len[i * images_per_batch:(i + 1) * images_per_batch]
+                    if i == im_batches - 1:
+                        # take all remaining images in the last batch
+                        # because len(images) % im_batches != 0 for most of the cases
+                        ims_now = ims[i * images_per_batch:]
+                        ims_len_now = ims_len[i * images_per_batch:]
+                    else:
+                        ims_now = ims[i * images_per_batch:(i + 1) * images_per_batch]
+                        ims_len_now = ims_len[i * images_per_batch:(i + 1) * images_per_batch]
                     ims_now = ims_now.cuda()
 
                     # d = numpy.dot(queries, ims.T)
