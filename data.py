@@ -5,6 +5,7 @@ import time
 from collections import OrderedDict
 from multiprocessing import Pool
 from pathlib import Path
+from typing import List
 
 import numpy as np
 import pandas as pd
@@ -85,23 +86,19 @@ def get_paths(config):
     return roots, ids
 
 
-class WICSMMIRDataset(data.Dataset):
-    """
-    WICSMMIR dataset compatible with torch.utils.data.DataLoader.
-    (WIkiCaps Subset for Multi-Modal Information Retrieval)
-    """
-
+class WICSMMIRDatasetBase:
     def __init__(self,
                  features_root: str,
-                 dataset_file: str,
+                 dataframe_file: str,
+                 load_columns: List[str],
                  shuffle: bool = True,
                  random_seed: int = 1312):
         self.features_root = Path(features_root)
         assert self.features_root.exists()
 
-        self.captions = pd.read_feather(dataset_file, use_threads=True, columns=['wikicaps_id', 'caption'])
+        self.dataframe = pd.read_feather(dataframe_file, use_threads=True, columns=load_columns)
         if shuffle:
-            self.captions = self.captions.sample(frac=1, random_state=random_seed)
+            self.dataframe = self.dataframe.sample(frac=1, random_state=random_seed)
 
     def _get_feature_file_path(self, wikicaps_id):
         f = self.features_root.joinpath(f'wikicaps_{wikicaps_id}.npz')
@@ -122,14 +119,68 @@ class WICSMMIRDataset(data.Dataset):
 
         return bua_feats, bua_bboxes
 
+
+class WICSMMIRDataset(WICSMMIRDatasetBase, data.Dataset):
+    """
+    WICSMMIR dataset compatible with torch.utils.data.DataLoader.
+    This is contains the captions as well as the image features and is used for training and evaluation
+    (WIkiCaps Subset for Multi-Modal Information Retrieval)
+    """
+
+    def __init__(self,
+                 features_root: str,
+                 dataframe_file: str,
+                 shuffle: bool = True,
+                 random_seed: int = 1312):
+        WICSMMIRDatasetBase.__init__(self,
+                                     features_root=features_root,
+                                     dataframe_file=dataframe_file,
+                                     load_columns=['wikicaps_id', 'caption'],
+                                     shuffle=shuffle,
+                                     random_seed=random_seed)
+
     def __getitem__(self, ds_idx):
-        wikicaps_id, caption = self.captions.iloc[ds_idx, 0:2]
+        wikicaps_id, caption = self.dataframe.iloc[ds_idx, 0:2]
         bua_feats, bua_bboxes = self._load_features(wikicaps_id)
 
         return bua_feats, bua_bboxes, caption, ds_idx, wikicaps_id
 
     def __len__(self):
-        return int(len(self.captions))
+        return int(len(self.dataframe))
+
+
+class WICSMMIRImageRetrievalDataset(WICSMMIRDatasetBase, data.Dataset):
+    """
+    WICSMMIR Dataset that uses only the images together with a user query.
+    Compatible with torch.utils.data.DataLoader.
+    """
+
+    def __init__(self,
+                 features_root: str,
+                 dataframe_file: str,
+                 query: str,
+                 shuffle: bool = True,
+                 random_seed: int = 1312):
+
+        WICSMMIRDatasetBase.__init__(self,
+                                     features_root=features_root,
+                                     dataframe_file=dataframe_file,
+                                     load_columns=['wikicaps_id'],
+                                     shuffle=shuffle,
+                                     random_seed=random_seed)
+
+        self.query = query
+
+    def __getitem__(self, ds_idx):
+        wikicaps_id = self.dataframe.iloc[ds_idx, 0]
+        bua_feats, bua_bboxes = self._load_features(wikicaps_id)
+
+        # we always return the query here since we want to compute the similarity of each image with the query
+        # this output is the input of the InferenceCollate function
+        return bua_feats, bua_bboxes, wikicaps_id, self.query, ds_idx
+
+    def __len__(self):
+        return int(len(self.dataframe))
 
 
 class CocoDataset(data.Dataset):
@@ -325,7 +376,7 @@ class PreComputedCocoFeaturesDataset(CocoImageRetrievalDatasetBase, data.Dataset
         img_feat_box = torch.Tensor(img_feat_box)
 
         # we always return the query here since we want to compute the similarity of each image with the query
-        # this output is the input of the CollateFn
+        # this output is the input of the InferenceCollate function
         return img_feat, img_feat_box, img_id, self.query, idx
 
     def __len__(self):

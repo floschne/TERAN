@@ -18,7 +18,7 @@ def load_top50(opts):
 
 
 def get_wicsmmir_data(ds_idx: int, dataset: WICSMMIRDataset):
-    wikicaps_id, caption = dataset.captions.iloc[ds_idx, 0:2]
+    wikicaps_id, caption = dataset.dataframe.iloc[ds_idx, 0:2]
     return {'wikicaps_id': wikicaps_id,
             'caption': caption}
 
