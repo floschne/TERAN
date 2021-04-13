@@ -824,36 +824,44 @@ def get_loaders(config, workers, batch_size=None):
     return train_loader, val_loader
 
 
-def get_coco_image_retrieval_data(config, query=None, num_workers=32, pre_compute_img_embs=False):
-    # get the directories that contain the coco json files and coco annotation ids (which we may not need, I think)
-    roots, coco_annotation_ids = get_paths(config)
-
+def get_image_retrieval_data(config, query=None, num_workers=32, pre_compute_img_embs=False):
     dataset_name = config['image-retrieval']['dataset']
     batch_size = config['image-retrieval']['batch_size']
     split_name = config['image-retrieval']['split']
-
-    imgs_root = roots[split_name]['img']
-
-    captions_json = roots[split_name]['cap']
-    coco_annotation_ids = coco_annotation_ids[split_name]
     num_imgs = config['image-retrieval']['num_imgs']
     pre_extracted_img_features_root = config['image-retrieval']['pre_extracted_img_features_root']
-
     use_precomputed_img_embeddings = config['image-retrieval']['use_precomputed_img_embeddings']
-    if use_precomputed_img_embeddings:
-        dataset = PreComputedCocoImageEmbeddingsDataset(captions_json=captions_json,
-                                                        coco_annotation_ids=coco_annotation_ids,
-                                                        num_imgs=num_imgs,
-                                                        config=config,
-                                                        num_workers=num_workers)
-        return dataset
 
-    dataset = PreComputedCocoFeaturesDataset(imgs_root=imgs_root,
-                                             img_features_path=pre_extracted_img_features_root,
-                                             captions_json=captions_json,
-                                             coco_annotation_ids=coco_annotation_ids,
-                                             query=query,
-                                             num_imgs=num_imgs)
+    if dataset_name == 'coco':
+        # get the directories that contain the coco json files and coco annotation ids (which we may not need, I think)
+        roots, coco_annotation_ids = get_paths(config)
+
+        imgs_root = roots[split_name]['img']
+
+        captions_json = roots[split_name]['cap']
+        coco_annotation_ids = coco_annotation_ids[split_name]
+        if use_precomputed_img_embeddings:
+            # We're not using a dataloader for precomputed image embeddings
+            dataset = PreComputedCocoImageEmbeddingsDataset(captions_json=captions_json,
+                                                            coco_annotation_ids=coco_annotation_ids,
+                                                            num_imgs=num_imgs,
+                                                            config=config,
+                                                            num_workers=num_workers)
+            return dataset
+        else:
+            dataset = PreComputedCocoFeaturesDataset(imgs_root=imgs_root,
+                                                     img_features_path=pre_extracted_img_features_root,
+                                                     captions_json=captions_json,
+                                                     coco_annotation_ids=coco_annotation_ids,
+                                                     query=query,
+                                                     num_imgs=num_imgs)
+    elif dataset_name == 'wicsmmir':
+        dataframe_file = config['dataset'][f'{split_name}_set']
+        dataset = WICSMMIRImageRetrievalDataset(features_root=config['dataset']['features_root'],
+                                                dataframe_file=dataframe_file,
+                                                query=query)
+    else:
+        raise NotImplementedError("Currently only COCO and WICSMMIR are supported!")
 
     # this creates the batches which get passed to the model (inside the query gets repeated or not based on the config)
     collate_fn = InferenceCollate(config, pre_compute_img_embs)

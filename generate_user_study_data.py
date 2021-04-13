@@ -84,7 +84,7 @@ if __name__ == '__main__':
     archive = tar.open(archive_file, "w:gz")
 
 
-    def reset(tarinfo):
+    def reset_info(tarinfo):
         tarinfo.uid = tarinfo.gid = 0
         tarinfo.uname = tarinfo.gname = "root"
         return tarinfo
@@ -92,8 +92,8 @@ if __name__ == '__main__':
 
     for wid in tqdm(res['wikicaps_id']):
         archive.add(os.path.join(opts.wicsmmir_images, f"wikicaps_{wid}.png"),
-                    filter=reset)
+                    filter=reset_info)
 
     # add dataframe to archive file
-    archive.add(df_outfile, filter=reset)
+    archive.add(df_outfile, filter=reset_info)
     archive.close()

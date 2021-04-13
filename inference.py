@@ -7,10 +7,11 @@ from typing import List
 
 import numpy as np
 import torch
-import tqdm
+import torch.utils.data as data
+from tqdm import tqdm, trange
 import yaml
 
-from data import get_coco_image_retrieval_data, QueryEncoder
+from data import get_image_retrieval_data, QueryEncoder, WICSMMIRImageRetrievalDataset
 from models.loss import AlignmentContrastiveLoss
 from models.teran import TERAN
 from utils import AverageMeter, LogCollector
@@ -25,7 +26,7 @@ def persist_img_embs(config, data_loader, dataset_indices, numpy_img_emb):
     img_names = get_image_names(dataset_indices, data_loader)
     # TODO do we want to store them in one big npz?
     for idx in range(len(img_names)):
-        dst = dst_root.joinpath(img_names[idx] + '.npz')
+        dst = dst_root.joinpath(str(img_names[idx]) + '.npz')
         if dst.exists():
             continue
         np.savez_compressed(str(dst), img_emb=numpy_img_emb[idx])
@@ -54,7 +55,7 @@ def encode_data_for_inference(model: TERAN, data_loader, log_step=10, logging=pr
 
     start_time = time.time()
     for i, (img_feature_batch, img_feat_bboxes_batch, img_feat_len_batch, query_token_batch, query_len_batch,
-            dataset_indices) in enumerate(data_loader):
+            dataset_indices) in enumerate(tqdm(data_loader)):
         batch_start_time = time.time()
         """
         the data loader returns None values for the respective batches if the only query was already loaded 
@@ -120,7 +121,7 @@ def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config):
     query_emb_batch.cuda()
 
     # batch-wise compute the alignment distance between the images and the query
-    for i in tqdm.trange(img_emb_batches):
+    for i in trange(img_emb_batches):
         # create the current batch
         img_embs_batch = img_embs[i * img_embs_per_batch:(i + 1) * img_embs_per_batch]
         img_embs_length_batch = [img_lengths for _ in range(img_embs_per_batch)]
@@ -143,6 +144,8 @@ def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config):
 
 
 def get_image_names(dataset_indices, dataset) -> List[str]:
+    if isinstance(dataset, data.DataLoader) and isinstance(dataset.dataset, WICSMMIRImageRetrievalDataset):
+        return dataset.dataset.dataframe.iloc[dataset_indices]['wikicaps_id'].to_numpy()
     return [dataset.get_image_metadata(idx)[1]['file_name'] for idx in dataset_indices]
 
 
@@ -150,7 +153,7 @@ def load_precomputed_image_embeddings(config, num_workers):
     print("Loading pre-computed image embeddings...")
     start = time.time()
     # returns a PreComputedCocoImageEmbeddingsDataset
-    dataset = get_coco_image_retrieval_data(config, num_workers=num_workers)
+    dataset = get_image_retrieval_data(config, num_workers=num_workers)
 
     # get the img embeddings and convert them to Tensors
     np_img_embs = np.array(list(dataset.img_embs.values()))
@@ -181,9 +184,9 @@ def top_k_image_retrieval(opts, config, checkpoint) -> List[str]:
 
     else:
         # returns a Dataloader of a PreComputedCocoFeaturesDataset
-        data_loader = get_coco_image_retrieval_data(config,
-                                                    query=opts.query,
-                                                    num_workers=opts.num_data_workers)
+        data_loader = get_image_retrieval_data(config,
+                                               query=opts.query,
+                                               num_workers=opts.num_data_workers)
         dataset = data_loader.dataset
         # encode the data (i.e. compute the embeddings / TE outputs for the images and query)
         img_embs, query_embs, img_lengths, query_lengths = encode_data_for_inference(model, data_loader)
@@ -225,11 +228,10 @@ def pre_compute_img_embeddings(opts, config, checkpoint):
     model.load_state_dict(checkpoint['model'], strict=False)
 
     print('Loading dataset')
-    data_loader = get_coco_image_retrieval_data(config,
-                                                query=opts.query,
-                                                num_workers=opts.num_data_workers,
-                                                pre_compute_img_embs=True)
-
+    data_loader = get_image_retrieval_data(config,
+                                           query=opts.query,
+                                           num_workers=opts.num_data_workers,
+                                           pre_compute_img_embs=True)
     # encode the data (i.e. compute the embeddings / TE outputs for the images and query)
     encode_data_for_inference(model, data_loader, pre_compute_img_embs=True)
 
@@ -250,7 +252,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_data_workers', type=int, default=8)
     parser.add_argument('--num_images', type=int, default=5000)
     parser.add_argument('--top_k', type=int, default=100)
-    parser.add_argument('--dataset', type=str, choices=['coco'], default='coco')  # TODO support other datasets
+    parser.add_argument('--dataset', type=str, choices=['coco', 'wicsmmir'], default='coco')  # TODO support other datasets
     parser.add_argument('--config', type=str, default='configs/teran_coco_MrSw_IR.yaml', help="Which configuration to "
                                                                                               "use for overriding the"
                                                                                               " checkpoint "
