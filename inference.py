@@ -7,11 +7,10 @@ from typing import List
 
 import numpy as np
 import torch
-import torch.utils.data as data
-from tqdm import tqdm, trange
 import yaml
+from tqdm import tqdm, trange
 
-from data import get_image_retrieval_data, QueryEncoder, WICSMMIRImageRetrievalDataset
+from data import get_image_retrieval_data, QueryEncoder, WICSMMIRImageRetrievalDataset, CocoImageRetrievalDatasetBase
 from models.loss import AlignmentContrastiveLoss
 from models.teran import TERAN
 from utils import AverageMeter, LogCollector
@@ -26,7 +25,7 @@ def persist_img_embs(config, data_loader, dataset_indices, numpy_img_emb):
     img_names = get_image_names(dataset_indices, data_loader)
     # TODO do we want to store them in one big npz?
     for idx in range(len(img_names)):
-        dst = dst_root.joinpath(str(img_names[idx]) + '.npz')
+        dst = dst_root.joinpath(img_names[idx] + '.npz')
         if dst.exists():
             continue
         np.savez_compressed(str(dst), img_emb=numpy_img_emb[idx])
@@ -143,10 +142,12 @@ def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config):
     return sorted_distance_indices
 
 
-def get_image_names(dataset_indices, dataset) -> List[str]:
-    if isinstance(dataset, data.DataLoader) and isinstance(dataset.dataset, WICSMMIRImageRetrievalDataset):
-        return dataset.dataset.dataframe.iloc[dataset_indices]['wikicaps_id'].to_numpy()
-    return [dataset.get_image_metadata(idx)[1]['file_name'] for idx in dataset_indices]
+def get_image_names(dataset_indices, dataloader) -> List[str]:
+    if isinstance(dataloader.dataset, WICSMMIRImageRetrievalDataset):
+        imgs = dataloader.dataset.dataframe.iloc[dataset_indices]['wikicaps_id'].to_numpy().tolist()
+        return [str(i) for i in imgs]
+    if isinstance(dataloader.dataset, CocoImageRetrievalDatasetBase):
+        return [str(dataloader.get_image_metadata(idx)[1]['file_name']) for idx in dataset_indices]
 
 
 def load_precomputed_image_embeddings(config, num_workers):
