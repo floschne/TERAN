@@ -1,7 +1,7 @@
 dataset:
   name: 'coco'
-  images-path: '/home/p0w3r/gitrepos/mt_image_retrieval_api/models/teran/data/coco/images'  # not needed if using pre-extracted bottom-up features
-  data: '/home/p0w3r/gitrepos/mt_image_retrieval_api/models/teran/data'
+  images-path: '/home/p0w3r/gitrepos/MMIR/models/teran/data/coco/images'  # not needed if using pre-extracted bottom-up features
+  data: '/home/p0w3r/gitrepos/MMIR/models/teran/data'
   restval: True
   pre-extracted-features: False
 
@@ -10,11 +10,11 @@ image-retrieval:
   split: 'test' # we can remove this in later versions
   num_imgs: 5000
   batch_size: 100 # 100 takes ~10s; 1000 takes ~14s to encode the data (compute the TE outputs)
-  pre_extracted_img_features_root: '/home/p0w3r/gitrepos/mt_image_retrieval_api/models/teran/data/coco/features_36'
+  pre_extracted_img_features_root: '/home/p0w3r/gitrepos/MMIR/models/teran/data/coco/features_36'
   create_query_batch: False
   alignment_mode: 'MrSw'
   use_precomputed_img_embeddings: True
-  pre_computed_img_embeddings_root: '/home/p0w3r/gitrepos/mt_image_retrieval_api/models/teran/data/coco/pre_computed_embeddings'
+  pre_computed_img_embeddings_root: '/home/p0w3r/gitrepos/MMIR/models/teran/data/coco/pre_computed_embeddings'
 
 text-model:
   name: 'bert'
@@ -28,7 +28,7 @@ text-model:
 
 image-model:
   name: 'bottomup'
-  pre-extracted-features-root: '/home/p0w3r/gitrepos/mt_image_retrieval_api/models/teran/data/coco/features_36'
+  pre-extracted-features-root: '/home/p0w3r/gitrepos/MMIR/models/teran/data/coco/features_36'
   transformer-layers: 4
   dropout: 0.1
   pos-encoding: 'concat-and-process'
