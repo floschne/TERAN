@@ -1,9 +1,10 @@
+import glob
 import json as jsonmod
 import os
 import pickle
 import time
-from collections import OrderedDict
 from multiprocessing import Pool
+from typing import List
 
 import numpy as np
 import torch
@@ -174,7 +175,70 @@ def load_img_emb(args):
     return idx, img_emd
 
 
-class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase):
+class PreComputedImageEmbeddingsDatasetBase:
+    def __init__(self,
+                 pre_computed_img_embeddings_root: str,
+                 image_ids: List[str] = None,
+                 num_images: int = None,
+                 fn_prefix: str = '',
+                 fn_suffix: str = '',
+                 pre_fetch_in_memory: bool = False,
+                 random_pre_fetch_fraction: float = 1.,  # TODO
+                 num_pre_fetch_workers: int = 8):
+
+        self.pre_computed_img_embeddings_root = pre_computed_img_embeddings_root
+        assert os.path.lexists(pre_computed_img_embeddings_root) and os.path.isdir(pre_computed_img_embeddings_root), \
+            f"Cannot read directory {pre_computed_img_embeddings_root}!"
+
+        self.num_pre_fetch_workers = num_pre_fetch_workers
+
+        if image_ids is not None:
+            self.image_ids = image_ids if num_images is None else image_ids[:num_images]
+            self.__file_names = {
+                img_id: os.path.join(pre_computed_img_embeddings_root, fn_prefix + img_id + fn_suffix + '.npz') for
+                img_id in image_ids}
+            for img_id, fn in self.__file_names.items():
+                assert os.path.lexists(fn) and os.path.isfile(
+                    fn), f"Cannot read pre-computed image embedding {fn} of image_id {img_id}!"
+        else:
+            files = glob.glob(os.path.join(pre_computed_img_embeddings_root, fn_prefix + "*" + fn_suffix + '.npz'))
+            self.image_ids = [os.path.basename(fn).replace(fn_prefix, '').replace(fn_suffix + '.npz', '') for fn in
+                              files]
+            if num_images is not None:
+                self.image_ids = self.image_ids[:num_images]
+            self.__file_names = {img_id: fn for img_id, fn in zip(self.image_ids, files)}
+            print(
+                f"Found {len(self.__file_names)} pre-computed image embeddings in {pre_computed_img_embeddings_root}!")
+
+        # setup pool
+        self.pool = Pool(self.num_pre_fetch_workers)
+
+        self.img_embs = {}
+        if pre_fetch_in_memory:
+            self.fetch_img_embs()
+
+    def fetch_img_embs(self):
+        start = time.time()
+        print(f'Parallel loading of {len(self.__file_names)} pre-computed image embeddings started...')
+        res = self.pool.map(load_img_emb, self.__file_names.items())
+        self.img_embs = dict(res)
+        print(f'Loading {len(self.__file_names)} image embeddings took {time.time() - start} seconds')
+
+    def __len__(self):
+        return len(self.__file_names)
+
+    def __contains__(self, img_id):
+        return img_id in self.image_ids
+
+    def __del__(self):
+        print("Closing PreComputedImageEmbeddingsDatasetBase pool")
+        if self.pool is not None:
+            self.pool.close()
+            self.pool.terminate()
+            self.pool.join()
+
+
+class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase, PreComputedImageEmbeddingsDatasetBase):
     """
     Custom COCO Dataset that uses pre-computed image embedding
     """
@@ -183,26 +247,17 @@ class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase):
         CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids, num_imgs)
 
         pre_computed_img_embeddings_root = config['image-retrieval']['pre_computed_img_embeddings_root']
+
+        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids, num_imgs)
+        PreComputedImageEmbeddingsDatasetBase.__init__(self, pre_computed_img_embeddings_root,
+                                                       num_images=num_imgs,
+                                                       pre_fetch_in_memory=True,
+                                                       num_pre_fetch_workers=num_workers)
+
         self.pre_computed_img_embeddings_root = pre_computed_img_embeddings_root
-        self.num_workers = num_workers
-
-        self.img_embs = self.__load_img_embs()
-
-    def __load_img_embs(self):
-        start = time.time()
-        print('Parallel loading of pre-computed image embeddings started...')
-        file_names = list(map(lambda m: os.path.join(self.pre_computed_img_embeddings_root, m[1]['file_name'] + '.npz'),
-                              [self.get_image_metadata(i) for i in range(self.num_imgs)]))
-        # parallel loading of all image embeddings
-        with Pool(self.num_workers) as pool:
-            res = pool.map(load_img_emb, enumerate(file_names))
-        pool.join()
-        res = OrderedDict(res)
-        print(f'Time elapsed to load pre-computed image embeddings: {time.time() - start} seconds')
-        return res
 
     def __len__(self):
-        return self.num_imgs
+        return PreComputedImageEmbeddingsDatasetBase.__len__(self)
 
 
 class QueryEncoder:
@@ -435,8 +490,8 @@ class InferenceCollate(object):
         cls.bboxes_length = bbox.shape[0] + 1
         cls.bboxes_dim = bbox.shape[1]
 
-    def __call__(self, data):
-        img_feats, img_feat_bboxes, img_ids, queries, dataset_indices = zip(*data)
+    def __call__(self, batch_data):
+        img_feats, img_feat_bboxes, img_ids, queries, dataset_indices = zip(*batch_data)
         """
         Build batch tensors from a list of (img_feats, img_feat_boxes, img_ids, queries, dataset_indices) tuples.
         This data comes from the dataset
