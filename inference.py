@@ -149,6 +149,7 @@ def get_image_names(dataset_indices, dataset) -> List[str]:
 def load_precomputed_image_embeddings(config, num_workers):
     print("Loading pre-computed image embeddings...")
     start = time.time()
+
     # returns a PreComputedCocoImageEmbeddingsDataset
     dataset = get_coco_image_retrieval_data(config, num_workers=num_workers)
 
@@ -156,7 +157,7 @@ def load_precomputed_image_embeddings(config, num_workers):
     np_img_embs = np.array(list(dataset.img_embs.values()))
     img_embs = torch.Tensor(np_img_embs)
     img_lengths = len(np_img_embs[0])
-    print(f"Time elapsed to load pre-computed embeddings and compute query embedding: {time.time() - start} seconds!")
+    print(f"Time elapsed to load pre-computed embeddings: {time.time() - start} seconds!")
     return img_embs, img_lengths, dataset
 
 

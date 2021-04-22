@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import glob
 import json as jsonmod
 import os
@@ -169,13 +171,13 @@ class CocoImageRetrievalDatasetBase:
 # This has to be outside any class so that it can be pickled for multiproc
 def load_img_emb(args):
     # just return the query and the img embedding
-    idx, file_name = args
+    img_id, file_name = args
     npz = np.load(file_name)
     img_emd = npz.get('img_emb')
-    return idx, img_emd
+    return img_id, img_emd
 
 
-class PreComputedImageEmbeddingsDatasetBase:
+class PreComputedImageEmbeddingsData:
     def __init__(self,
                  pre_computed_img_embeddings_root: str,
                  image_ids: List[str] = None,
@@ -191,6 +193,8 @@ class PreComputedImageEmbeddingsDatasetBase:
             f"Cannot read directory {pre_computed_img_embeddings_root}!"
 
         self.num_pre_fetch_workers = num_pre_fetch_workers
+        self.fn_suffix = fn_suffix
+        self.fn_prefix = fn_prefix
 
         if image_ids is not None:
             self.image_ids = image_ids if num_images is None else image_ids[:num_images]
@@ -218,11 +222,46 @@ class PreComputedImageEmbeddingsDatasetBase:
             self.fetch_img_embs()
 
     def fetch_img_embs(self):
+        """
+        Fetches the image embeddings from disk and loads into memory
+        """
+        if len(self.img_embs) != 0:
+            print("Image Embeddings already in memory!")
+            return
         start = time.time()
         print(f'Parallel loading of {len(self.__file_names)} pre-computed image embeddings started...')
         res = self.pool.map(load_img_emb, self.__file_names.items())
         self.img_embs = dict(res)
         print(f'Loading {len(self.__file_names)} image embeddings took {time.time() - start} seconds')
+
+    def get_subset(self, image_ids: List[str], pre_fetch_in_memory: bool = False) -> PreComputedImageEmbeddingsData:
+        """
+        Returns a subset containing the image embeddings for all ids in image_ids
+        :param image_ids: list of image ids
+        :param pre_fetch_in_memory: if true, load the images
+        :return: subset of image embeddings containing the image embeddings for all ids in image_ids
+        """
+        subset = PreComputedImageEmbeddingsData(pre_computed_img_embeddings_root=self.pre_computed_img_embeddings_root,
+                                                image_ids=image_ids,
+                                                num_images=None,
+                                                fn_prefix=self.fn_prefix,
+                                                fn_suffix=self.fn_suffix,
+                                                pre_fetch_in_memory=False,
+                                                num_pre_fetch_workers=self.num_pre_fetch_workers)
+        if len(self.img_embs) != 0:
+            subset.img_embs = {img_id: self.img_embs[img_id] for img_id in image_ids}
+            assert len(subset.img_embs) == len(subset) == len(image_ids)
+        elif pre_fetch_in_memory:
+            subset.fetch_img_embs()
+        return subset
+
+    def get_image_id(self, idx: int):
+        """
+        returns the image_id of th idx'th sample
+        :param idx: the index of the sample for which the image_id should be returned
+        :return: image_id of th idx'th sample
+        """
+        return self.image_ids[idx]
 
     def __len__(self):
         return len(self.__file_names)
@@ -232,13 +271,14 @@ class PreComputedImageEmbeddingsDatasetBase:
 
     def __del__(self):
         print("Closing PreComputedImageEmbeddingsDatasetBase pool")
+        # FIXME self.pool --> unresolved?! why
         if self.pool is not None:
             self.pool.close()
             self.pool.terminate()
             self.pool.join()
 
 
-class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase, PreComputedImageEmbeddingsDatasetBase):
+class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase, PreComputedImageEmbeddingsData):
     """
     Custom COCO Dataset that uses pre-computed image embedding
     """
@@ -249,15 +289,15 @@ class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase, PreCo
         pre_computed_img_embeddings_root = config['image-retrieval']['pre_computed_img_embeddings_root']
 
         CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids, num_imgs)
-        PreComputedImageEmbeddingsDatasetBase.__init__(self, pre_computed_img_embeddings_root,
-                                                       num_images=num_imgs,
-                                                       pre_fetch_in_memory=True,
-                                                       num_pre_fetch_workers=num_workers)
+        PreComputedImageEmbeddingsData.__init__(self, pre_computed_img_embeddings_root,
+                                                num_images=num_imgs,
+                                                pre_fetch_in_memory=True,
+                                                num_pre_fetch_workers=num_workers)
 
         self.pre_computed_img_embeddings_root = pre_computed_img_embeddings_root
 
     def __len__(self):
-        return PreComputedImageEmbeddingsDatasetBase.__len__(self)
+        return PreComputedImageEmbeddingsData.__len__(self)
 
 
 class QueryEncoder:
