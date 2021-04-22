@@ -147,7 +147,7 @@ def get_image_names(dataset_indices, dataloader) -> List[str]:
         imgs = dataloader.dataset.dataframe.iloc[dataset_indices]['wikicaps_id'].to_numpy().tolist()
         return [str(i) for i in imgs]
     if isinstance(dataloader.dataset, CocoImageRetrievalDatasetBase):
-        return [str(dataloader.get_image_metadata(idx)[1]['file_name']) for idx in dataset_indices]
+        return [str(dataloader.dataset.get_image_metadata(idx)[1]['file_name']) for idx in dataset_indices]
 
 
 def load_precomputed_image_embeddings(config, num_workers):
@@ -251,7 +251,6 @@ if __name__ == '__main__':
                                                                                   "specified in the config.")
     parser.add_argument('--query', type=str, required='--pre_compute_img_embeddings' not in sys.argv)
     parser.add_argument('--num_data_workers', type=int, default=8)
-    parser.add_argument('--num_images', type=int, default=5000)
     parser.add_argument('--top_k', type=int, default=100)
     parser.add_argument('--dataset', type=str, choices=['coco', 'wicsmmir'], default='coco')  # TODO support other datasets
     parser.add_argument('--config', type=str, default='configs/teran_coco_MrSw_IR.yaml', help="Which configuration to "

@@ -251,18 +251,37 @@ class CocoDataset(data.Dataset):
 
 
 class CocoImageRetrievalDatasetBase:
-    def __init__(self, captions_json, coco_annotation_ids, num_imgs):
-        self.num_imgs = num_imgs
-
-        self.coco = COCO(captions_json)
-        self.anno_ids = coco_annotation_ids
+    def __init__(self, captions_json, coco_annotation_ids):
+        if isinstance(captions_json, tuple):  # if train caption_train AND caption_val are used (for what ever reason?!)
+            self.coco = (COCO(captions_json[0]), COCO(captions_json[1]))
+        else:
+            self.coco = COCO(captions_json)
+        if isinstance(coco_annotation_ids, tuple):  # if train, this is also a tuple!
+            self.bp = len(coco_annotation_ids[0])
+            self.anno_ids = list(coco_annotation_ids[0]) + list(coco_annotation_ids[1])
+        else:
+            self.bp = len(coco_annotation_ids)
+            self.anno_ids = coco_annotation_ids
 
     def get_image_metadata(self, idx):
         next_img_idx = idx * 5  # in the coco dataset there are 5 captions for every image
+
+        if isinstance(self.coco, tuple):
+            if next_img_idx < self.bp:
+                coco = self.coco[0]
+            else:
+                coco = self.coco[1]
+        else:
+            coco = self.coco
+
         ann_id = self.anno_ids[next_img_idx]
-        coco_img_id = self.coco.anns[ann_id]['image_id']
-        img_metadata = self.coco.imgs[coco_img_id]
+        coco_img_id = coco.anns[ann_id]['image_id']
+        img_metadata = coco.imgs[coco_img_id]
         return coco_img_id, img_metadata
+
+    def __len__(self):
+        # there are 5 captions / annotations per image
+        return len(self.anno_ids) // 5
 
 
 # This has to be outside any class so that it can be pickled for multiproc
@@ -279,8 +298,8 @@ class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase):
     Custom COCO Dataset that uses pre-computed image embedding
     """
 
-    def __init__(self, captions_json, coco_annotation_ids, num_imgs, config, num_workers=32):
-        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids, num_imgs)
+    def __init__(self, captions_json, coco_annotation_ids, config, num_workers=32):
+        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids)
 
         pre_computed_img_embeddings_root = config['image-retrieval']['pre_computed_img_embeddings_root']
         self.pre_computed_img_embeddings_root = pre_computed_img_embeddings_root
@@ -292,7 +311,7 @@ class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase):
         start = time.time()
         print('Parallel loading of pre-computed image embeddings started...')
         file_names = list(map(lambda m: os.path.join(self.pre_computed_img_embeddings_root, m[1]['file_name'] + '.npz'),
-                              [self.get_image_metadata(i) for i in range(self.num_imgs)]))
+                              [self.get_image_metadata(i) for i in range(len(self))]))
         # parallel loading of all image embeddings
         with Pool(self.num_workers) as pool:
             res = pool.map(load_img_emb, enumerate(file_names))
@@ -300,9 +319,6 @@ class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase):
         res = OrderedDict(res)
         print(f'Time elapsed to load pre-computed image embeddings: {time.time() - start} seconds')
         return res
-
-    def __len__(self):
-        return self.num_imgs
 
 
 class QueryEncoder:
@@ -344,12 +360,12 @@ class QueryEncoder:
 
 class PreComputedCocoFeaturesDataset(CocoImageRetrievalDatasetBase, data.Dataset):
     """
-    Custom COCO Dataset that uses only the images together with a user query.
+    Custom COCO Dataset that uses only the images (to be used later together with a user query)
     Compatible with torch.utils.data.DataLoader.
     """
 
-    def __init__(self, imgs_root, img_features_path, captions_json, coco_annotation_ids, query, num_imgs):
-        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids, num_imgs)
+    def __init__(self, imgs_root, img_features_path, captions_json, coco_annotation_ids, query):
+        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids)
 
         self.feats_data_path = os.path.join(img_features_path, 'bu_att')
         self.box_data_path = os.path.join(img_features_path, 'bu_box')
@@ -378,9 +394,6 @@ class PreComputedCocoFeaturesDataset(CocoImageRetrievalDatasetBase, data.Dataset
         # we always return the query here since we want to compute the similarity of each image with the query
         # this output is the input of the InferenceCollate function
         return img_feat, img_feat_box, img_id, self.query, idx
-
-    def __len__(self):
-        return self.num_imgs
 
 
 class BottomUpFeaturesDataset:
@@ -828,7 +841,6 @@ def get_image_retrieval_data(config, query=None, num_workers=32, pre_compute_img
     dataset_name = config['image-retrieval']['dataset']
     batch_size = config['image-retrieval']['batch_size']
     split_name = config['image-retrieval']['split']
-    num_imgs = config['image-retrieval']['num_imgs']
     pre_extracted_img_features_root = config['image-retrieval']['pre_extracted_img_features_root']
     use_precomputed_img_embeddings = config['image-retrieval']['use_precomputed_img_embeddings']
 
@@ -844,7 +856,6 @@ def get_image_retrieval_data(config, query=None, num_workers=32, pre_compute_img
             # We're not using a dataloader for precomputed image embeddings
             dataset = PreComputedCocoImageEmbeddingsDataset(captions_json=captions_json,
                                                             coco_annotation_ids=coco_annotation_ids,
-                                                            num_imgs=num_imgs,
                                                             config=config,
                                                             num_workers=num_workers)
             return dataset
@@ -853,8 +864,7 @@ def get_image_retrieval_data(config, query=None, num_workers=32, pre_compute_img
                                                      img_features_path=pre_extracted_img_features_root,
                                                      captions_json=captions_json,
                                                      coco_annotation_ids=coco_annotation_ids,
-                                                     query=query,
-                                                     num_imgs=num_imgs)
+                                                     query=query)
     elif dataset_name == 'wicsmmir':
         dataframe_file = config['dataset'][f'{split_name}_set']
         dataset = WICSMMIRImageRetrievalDataset(features_root=config['dataset']['features_root'],
