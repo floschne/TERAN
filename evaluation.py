@@ -7,13 +7,13 @@ import numpy as np
 import torch
 import tqdm
 
+from data import get_test_loader
 from evaluate_utils.dcg import DCG
 from models.loss import order_sim, AlignmentContrastiveLoss
 from utils import get_model, AverageMeter, LogCollector
-from data import get_coco_image_retrieval_data, get_test_loader
 
 
-def encode_data(model, data_loader, log_step=10, logging=print):
+def encode_data(model, data_loader, log_step=10, logging=print, max_cap_len=None, max_img_len=None):
     """
     Encode all images and captions loadable by `data_loader`
     """
@@ -31,14 +31,20 @@ def encode_data(model, data_loader, log_step=10, logging=print):
     img_lengths = []
     cap_lengths = []
 
-    # compute maximum lenghts in the whole dataset
-    max_cap_len = 88
-    max_img_len = 37
-    # for _, _, img_length, cap_length, _, _ in data_loader:
-    #     max_cap_len = max(max_cap_len, max(cap_length))
-    #     max_img_len = max(max_img_len, max(img_length))
+    if max_cap_len is None or max_img_len is None:
+        # compute maximum lenghts in the whole dataset
+        # max_cap_len = 88
+        # max_img_len = 37
+        max_cap_len = -1
+        max_img_len = -1
+        for _, _, img_length, cap_length, _, _ in tqdm.tqdm(data_loader,
+                                                            desc="Finding maximum image and caption length..."):
+            max_cap_len = max(max_cap_len, max(cap_length))
+            max_img_len = max(max_img_len, max(img_length))
+        print(f"Found max image and cap lengths: {max_cap_len} , {max_img_len}")
 
-    for i, (images, targets, img_length, cap_length, boxes, ids) in enumerate(data_loader):
+    for i, (images, targets, img_length, cap_length, boxes, ids) in enumerate(
+            tqdm.tqdm(data_loader, desc='Encoding Data for evaluation...')):
         # make sure val logger is used
         model.logger = val_logger
 
@@ -55,7 +61,7 @@ def encode_data(model, data_loader, log_step=10, logging=print):
             _, _, img_emb, cap_emb, cap_length = model.forward_emb(images, text, img_length, cap_length, boxes)
 
             # initialize the numpy arrays given the size of the embeddings
-            if img_embs is None: # N x max_len x 1024
+            if img_embs is None:  # N x max_len x 1024
                 img_embs = torch.zeros((len(data_loader.dataset), max_img_len, img_emb.size(2)))
                 cap_embs = torch.zeros((len(data_loader.dataset), max_cap_len, cap_emb.size(2)))
 
@@ -76,9 +82,9 @@ def encode_data(model, data_loader, log_step=10, logging=print):
             logging('Test: [{0}/{1}]\t'
                     '{e_log}\t'
                     'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                    .format(
-                        i, len(data_loader), batch_time=batch_time,
-                        e_log=str(model.logger)))
+                .format(
+                i, len(data_loader), batch_time=batch_time,
+                e_log=str(model.logger)))
         del images, captions
 
     # p = np.random.permutation(len(data_loader.dataset) // 5) * 5
@@ -101,8 +107,8 @@ def evalrank(config, checkpoint, split='dev', fold5=False, eval_t2i=True, eval_i
 
     # load model and options
     # checkpoint = torch.load(model_path)
-    data_path = config['dataset']['data']
-    measure = config['training']['measure']
+    # data_path = config['dataset']['data']
+    # measure = config['training']['measure']
 
     # construct model
     model = get_model(config)
@@ -111,10 +117,13 @@ def evalrank(config, checkpoint, split='dev', fold5=False, eval_t2i=True, eval_i
     model.load_state_dict(checkpoint['model'], strict=False)
 
     print('Loading dataset')
-    data_loader = get_test_loader(config, workers=4, split_name=split)
-
+    data_loader = get_test_loader(config, workers=16, split_name=split)
+    wicsmmir = config['dataset']['name'] == 'wicsmmir'
     # initialize ndcg scorer
-    ndcg_val_scorer = DCG(config, len(data_loader.dataset), split, rank=25, relevance_methods=['rougeL', 'spice'])
+    if wicsmmir:
+        ndcg_val_scorer = None
+    else:
+        ndcg_val_scorer = DCG(config, len(data_loader.dataset), split, rank=25, relevance_methods=['rougeL', 'spice'])
 
     # initialize similarity matrix evaluator
     sim_matrix_fn = AlignmentContrastiveLoss(aggregation=config['training']['alignment-mode'],
@@ -123,7 +132,16 @@ def evalrank(config, checkpoint, split='dev', fold5=False, eval_t2i=True, eval_i
 
     print('Computing results...')
     encode_data_start_time = time.time()
-    img_embs, cap_embs, img_lenghts, cap_lenghts = encode_data(model, data_loader)
+
+    if wicsmmir:
+        # for wicsmmir v1 test set this is known (computed before)
+        mil = 37
+        mcl = 236
+    else:
+        mil = None
+        mcl = None
+
+    img_embs, cap_embs, img_lenghts, cap_lenghts = encode_data(model, data_loader, max_img_len=mil, max_cap_len=mcl)
     print(f"Time elapsed for encode_data: {time.time() - encode_data_start_time} seconds.")
 
     torch.cuda.empty_cache()
@@ -138,9 +156,9 @@ def evalrank(config, checkpoint, split='dev', fold5=False, eval_t2i=True, eval_i
     # else:
     #     img_embs2, cap_embs2 = None, None
     #     print('Using NO ensemble')
-
+    num_caps_per_image = 1 if wicsmmir else 5
     print('Images: %d, Captions: %d' %
-          (img_embs.shape[0] / 5, cap_embs.shape[0]))
+          (img_embs.shape[0] / num_caps_per_image, cap_embs.shape[0]))
 
     if not fold5:
         # no cross-validation, full evaluation
@@ -171,7 +189,8 @@ def evalrank(config, checkpoint, split='dev', fold5=False, eval_t2i=True, eval_i
                           return_ranks=True,
                           ndcg_scorer=ndcg_val_scorer,
                           sim_function=sim_matrix_fn,
-                          im_batches=5)
+                          im_batches=3,
+                          wicsmmir=wicsmmir)
 
             ari = (ri[0] + ri[1] + ri[2]) / 3
             print("Average t2i Recall: %.1f" % ari)
@@ -208,7 +227,6 @@ def evalrank(config, checkpoint, split='dev', fold5=False, eval_t2i=True, eval_i
                     rti = rti0
                 ari = (ri[0] + ri[1] + ri[2]) / 3
 
-
             if eval_t2i and eval_i2t:
                 rsum = r[0] + r[1] + r[2] + ri[0] + ri[1] + ri[2]
                 print("rsum: %.1f ar: %.1f ari: %.1f" % (rsum, ar, ari))
@@ -244,13 +262,10 @@ def evalrank(config, checkpoint, split='dev', fold5=False, eval_t2i=True, eval_i
             print("Image to text: %.1f %.1f %.1f %.1f %.1f ndcg_rouge=%.4f ndcg_spice=%.4f" %
                   mean_metrics[:7])
 
-
-
-
     if eval_t2i and eval_i2t:
         torch.save({'rt': rt, 'rti': rti}, 'ranks.pth.tar')
     elif eval_t2i:
-        torch.save({'rti': rti}, 'ranks.pth.tar')
+        torch.save({'rti': rti}, f'ranks{config["dataset"]["name"]}.pth.tar')
     elif eval_i2t:
         torch.save({'rt': rt}, 'ranks.pth.tar')
 
@@ -258,14 +273,18 @@ def evalrank(config, checkpoint, split='dev', fold5=False, eval_t2i=True, eval_i
 
 
 def i2t(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=False, ndcg_scorer=None, fold_index=0,
-        measure='dot', sim_function=None, cap_batches=1):
+        measure='dot', sim_function=None, cap_batches=1, wicsmmir=False):
     """
     Images->Text (Image Annotation)
-    Images: (5N, K) matrix of images
-    Captions: (5N, K) matrix of captions
+    Images: (num_captions_per_image * N, K) matrix of images
+    Captions: (num_captions_per_image * N, K) matrix of captions
     """
+    if not wicsmmir:
+        num_captions_per_image = 5
+    else:
+        num_captions_per_image = 1
     if npts is None:
-        npts = images.shape[0] // 5
+        npts = images.shape[0] // num_captions_per_image
     index_list = []
 
     ranks = numpy.zeros(npts)
@@ -278,9 +297,9 @@ def i2t(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=Fals
     for index in tqdm.trange(npts):
 
         # Get query image
-        im = images[5 * index].reshape(1, images.shape[1], images.shape[2])
+        im = images[num_captions_per_image * index].reshape(1, images.shape[1], images.shape[2])
         im = im.cuda() if sim_function is not None else im
-        im_len = [img_lenghts[5 * index]]
+        im_len = [img_lenghts[num_captions_per_image * index]]
 
         d = None
 
@@ -288,8 +307,8 @@ def i2t(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=Fals
         if measure == 'order':
             bs = 100
             if index % bs == 0:
-                mx = min(images.shape[0], 5 * (index + bs))
-                im2 = images[5 * index:mx:5]
+                mx = min(images.shape[0], num_captions_per_image * (index + bs))
+                im2 = images[num_captions_per_image * index:mx:num_captions_per_image]
                 d2 = order_sim(torch.Tensor(im2).cuda(),
                                torch.Tensor(captions).cuda())
                 d2 = d2.cpu().numpy()
@@ -318,8 +337,18 @@ def i2t(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=Fals
 
         # Score
         rank = 1e20
-        for i in range(5 * index, 5 * index + 5, 1):
-            tmp = numpy.where(inds == i)[0][0]
+        for i in range(num_captions_per_image * index, num_captions_per_image * index + num_captions_per_image, 1):
+            w = numpy.where(inds == i)
+            if isinstance(w, tuple) and isinstance(w[0], np.ndarray) and len(w[0]) > 0:
+                tmp = w[0][0]
+            elif isinstance(w, np.ndarray) and len(w) > 0:
+                tmp = w[0]
+            elif isinstance(w, np.int64):
+                tmp = w
+            else:
+                print(f"Strange error occurred.. w: {w} | i: {i} | inds.shape:  {inds.shape}")
+                tmp = rank
+
             if tmp < rank:
                 rank = tmp
         ranks[index] = rank
@@ -345,53 +374,67 @@ def i2t(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=Fals
 
 
 def t2i(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=False, ndcg_scorer=None, fold_index=0,
-        measure='dot', sim_function=None, im_batches=1):
+        measure='dot', sim_function=None, im_batches=1, wicsmmir=False):
     """
     Text->Images (Image Search)
-    Images: (5N, K) matrix of images
-    Captions: (5N, K) matrix of captions
+    Images: (num_captions_per_image * N, K) matrix of images
+    Captions: (num_captions_per_image * N, K) matrix of captions
     """
+    if not wicsmmir:
+        num_captions_per_image = 5
+    else:
+        num_captions_per_image = 1
     if npts is None:
-        npts = images.shape[0] // 5
-    ims = torch.stack([images[i] for i in range(0, len(images), 5)], dim=0)
+        npts = images.shape[0] // num_captions_per_image
+    ims = torch.stack([images[i] for i in range(0, len(images), num_captions_per_image)], dim=0)
     # ims = ims.cuda()
-    ims_len = [img_lenghts[i] for i in range(0, len(images), 5)]
+    ims_len = [img_lenghts[i] for i in range(0, len(images), num_captions_per_image)]
 
-    ranks = numpy.zeros(5 * npts)
-    top50 = numpy.zeros((5 * npts, 50))
-    rougel_ndcgs = numpy.zeros(5 * npts)
-    spice_ndcgs = numpy.zeros(5 * npts)
+    ranks = numpy.zeros(num_captions_per_image * npts)
+    top50 = numpy.zeros((num_captions_per_image * npts, 50))
+    rougel_ndcgs = numpy.zeros(num_captions_per_image * npts)
+    spice_ndcgs = numpy.zeros(num_captions_per_image * npts)
 
     images_per_batch = ims.shape[0] // im_batches
 
+    # loop over all captions
     for index in tqdm.trange(npts):
 
         # Get query captions
-        queries = captions[5 * index:5 * index + 5]
+        queries = captions[num_captions_per_image * index:num_captions_per_image * index + num_captions_per_image]
         queries = queries.cuda() if sim_function is not None else queries
-        queries_len = cap_lenghts[5 * index:5 * index + 5]
+        queries_len = cap_lenghts[
+                      num_captions_per_image * index:num_captions_per_image * index + num_captions_per_image]
 
         d = None
 
         # Compute scores
         if measure == 'order':
             bs = 100
-            if 5 * index % bs == 0:
-                mx = min(captions.shape[0], 5 * index + bs)
-                q2 = captions[5 * index:mx]
+            if num_captions_per_image * index % bs == 0:
+                mx = min(captions.shape[0], num_captions_per_image * index + bs)
+                q2 = captions[num_captions_per_image * index:mx]
                 d2 = order_sim(torch.Tensor(ims).cuda(),
                                torch.Tensor(q2).cuda())
                 d2 = d2.cpu().numpy()
 
-            d = d2[:, (5 * index) % bs:(5 * index) % bs + 5].T
+            d = d2[:,
+                (num_captions_per_image * index) % bs:(num_captions_per_image * index) % bs + num_captions_per_image].T
         else:
             if sim_function is None:
                 d = torch.mm(queries[:, 0, :], ims[:, 0, :].t())
                 d = d.cpu().numpy()
             else:
+                # loop over all images batch-wise and compute distances to current (the index'th) caption/query
                 for i in range(im_batches):
-                    ims_now = ims[i * images_per_batch:(i + 1) * images_per_batch]
-                    ims_len_now = ims_len[i * images_per_batch:(i + 1) * images_per_batch]
+                    if i == im_batches - 1:
+                        # take all remaining images in the last batch
+                        # because len(images) % im_batches != 0 for most of the cases
+                        ims_now = ims[i * images_per_batch:]
+                        ims_len_now = ims_len[i * images_per_batch:]
+                    else:
+                        ims_now = ims[i * images_per_batch:(i + 1) * images_per_batch]
+                        ims_len_now = ims_len[i * images_per_batch:(i + 1) * images_per_batch]
                     ims_now = ims_now.cuda()
 
                     # d = numpy.dot(queries, ims.T)
@@ -409,13 +452,24 @@ def t2i(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=Fals
         inds = numpy.zeros(d.shape)
         for i in range(len(inds)):
             inds[i] = numpy.argsort(d[i])[::-1]
-            # in che posizione e' l'immagine (index) che ha questa caption (5*index + i)
-            ranks[5 * index + i] = numpy.where(inds[i] == index)[0][0]
-            top50[5 * index + i] = inds[i][0:50]
+            # in che posizione e' l'immagine (index) che ha questa caption (num_captions_per_image*index + i)
+            w = numpy.where(inds[i] == index)
+            if isinstance(w, tuple) and isinstance(w[0], np.ndarray) and len(w[0]) > 0:
+                tmp = w[0][0]
+            elif isinstance(w, np.ndarray) and len(w) > 0:
+                tmp = w[0]
+            elif isinstance(w, np.int64):
+                tmp = w
+            else:
+                print(f"Strange error occurred.. w: {w} | i: {i} | inds.shape:  {inds.shape}")
+                tmp = 1e2 # 1e20
+
+            ranks[num_captions_per_image * index + i] = tmp
+            top50[num_captions_per_image * index + i] = inds[i][0:50]
             # calculate ndcg
             if ndcg_scorer is not None:
-                rougel_ndcgs[5 * index + i], spice_ndcgs[5 * index + i] = \
-                    ndcg_scorer.compute_ndcg(npts, 5 * index + i, inds[i].astype(int),
+                rougel_ndcgs[num_captions_per_image * index + i], spice_ndcgs[num_captions_per_image * index + i] = \
+                    ndcg_scorer.compute_ndcg(npts, num_captions_per_image * index + i, inds[i].astype(int),
                                              fold_index=fold_index, retrieval='image').values()
 
     # Compute metrics
@@ -431,4 +485,3 @@ def t2i(images, captions, img_lenghts, cap_lenghts, npts=None, return_ranks=Fals
         return (r1, r5, r10, medr, meanr, mean_rougel_ndcg, mean_spice_ndcg), (ranks, top50)
     else:
         return (r1, r5, r10, medr, meanr, mean_rougel_ndcg, mean_spice_ndcg)
-

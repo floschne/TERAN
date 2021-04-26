@@ -1,20 +1,10 @@
 dataset:
-  name: 'coco'
-  images-path: 'data/coco/images'  # not needed if using pre-extracted bottom-up features
-  data: 'data'
-  restval: True
-  pre-extracted-features: False
-
-image-retrieval:
-  dataset: 'coco' # for now only coco support
-  split: 'test' # we can remove this in later versions
-  num_imgs: 5000
-  batch_size: 100 # 100 takes ~10s; 1000 takes ~14s to encode the data (compute the TE outputs)
-  pre_extracted_img_features_root: 'data/coco/features_36'
-  create_query_batch: False
-  alignment_mode: 'MrSw'
-  use_precomputed_img_embeddings: False
-  pre_computed_img_embeddings_root: 'data/coco/pre_computed_embeddings'
+  name: 'wicsmmir'
+  train_set: 'data/wicsmmir/train_set_v1.df.feather'
+  test_set: 'data/wicsmmir/test_set_v1.df.feather'
+  features_root: 'data/wicsmmir/features_36'
+  random_seed: 1312
+  pre-extracted-features: False  # this doesn't mean the pre-extracted-features from BUA... (name makes no so much sense..)
 
 text-model:
   name: 'bert'
@@ -28,7 +18,7 @@ text-model:
 
 image-model:
   name: 'bottomup'
-  pre-extracted-features-root: 'data/coco/features_36'
+  pre-extracted-features-root: 'data/wikicaps/features_36'
   transformer-layers: 4
   dropout: 0.1
   pos-encoding: 'concat-and-process'
@@ -55,7 +45,7 @@ training:
   alignment-mode: 'MrSw'
   measure: 'dot'
   margin: 0.2
-  bs: 40
+  bs: 25
   scheduler: 'steplr'
   gamma: 0.1
   step-size: 20

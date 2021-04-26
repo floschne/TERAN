@@ -28,8 +28,7 @@ def main(opt, current_config):
 
     # Override some mandatory things in the configuration (paths)
     if current_config is not None:
-        loaded_config['dataset']['images-path'] = current_config['dataset']['images-path']
-        loaded_config['dataset']['data'] = current_config['dataset']['data']
+        loaded_config['dataset'] = current_config['dataset']
         loaded_config['image-model']['pre-extracted-features-root'] = current_config['image-model'][
             'pre-extracted-features-root']
         loaded_config['training']['bs'] = current_config['training']['bs']
