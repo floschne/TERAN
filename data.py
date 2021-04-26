@@ -283,10 +283,10 @@ class PreComputedImageEmbeddingsData:
         return img_id in self.image_ids
 
     def __del__(self):
-        print("Closing PreComputedImageEmbeddingsDatasetBase pool")
         try:
             # FIXME self.pool --> unresolved?! why
             if not self.is_subset:
+                print("Closing PreComputedImageEmbeddingsDatasetBase pool")
                 self.__close_pool()
         except Exception:
             pass
