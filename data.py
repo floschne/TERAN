@@ -9,6 +9,7 @@ from multiprocessing import Pool
 from typing import List
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.utils.data as data
 import torchvision.transforms as transforms
@@ -86,6 +87,103 @@ def get_paths(config):
     return roots, ids
 
 
+class WICSMMIRDatasetBase:
+    def __init__(self,
+                 features_root: str,
+                 dataframe_file: str,
+                 load_columns: List[str],
+                 shuffle: bool = True,
+                 random_seed: int = 1312):
+        self.features_root = Path(features_root)
+        assert self.features_root.exists()
+
+        self.dataframe = pd.read_feather(dataframe_file, use_threads=True, columns=load_columns)
+        if shuffle:
+            self.dataframe = self.dataframe.sample(frac=1, random_state=random_seed)
+
+    def _get_feature_file_path(self, wikicaps_id):
+        f = self.features_root.joinpath(f'wikicaps_{wikicaps_id}.npz')
+        assert f.exists()
+        return str(f)
+
+    def _load_features(self, wikicaps_id):
+        feat_npz = np.load(self._get_feature_file_path(wikicaps_id), allow_pickle=True)
+        bua_feats = feat_npz['x']  # shape: (36, 2048)
+        bua_bboxes = feat_npz['bbox']  # shape: (36, 4)
+        img_size = (feat_npz['image_w'], feat_npz['image_h'])  # Tuple[int, int]
+
+        # normalize box (see BottomUpFeaturesDataset)
+        bua_bboxes = bua_bboxes / np.tile(img_size, 2)
+
+        bua_feats = torch.Tensor(bua_feats)
+        bua_bboxes = torch.Tensor(bua_bboxes)
+
+        return bua_feats, bua_bboxes
+
+
+class WICSMMIRDataset(WICSMMIRDatasetBase, data.Dataset):
+    """
+    WICSMMIR dataset compatible with torch.utils.data.DataLoader.
+    This is contains the captions as well as the image features and is used for training and evaluation
+    (WIkiCaps Subset for Multi-Modal Information Retrieval)
+    """
+
+    def __init__(self,
+                 features_root: str,
+                 dataframe_file: str,
+                 shuffle: bool = True,
+                 random_seed: int = 1312):
+        WICSMMIRDatasetBase.__init__(self,
+                                     features_root=features_root,
+                                     dataframe_file=dataframe_file,
+                                     load_columns=['wikicaps_id', 'caption'],
+                                     shuffle=shuffle,
+                                     random_seed=random_seed)
+
+    def __getitem__(self, ds_idx):
+        wikicaps_id, caption = self.dataframe.iloc[ds_idx, 0:2]
+        bua_feats, bua_bboxes = self._load_features(wikicaps_id)
+
+        return bua_feats, bua_bboxes, caption, ds_idx, wikicaps_id
+
+    def __len__(self):
+        return int(len(self.dataframe))
+
+
+class WICSMMIRImageRetrievalDataset(WICSMMIRDatasetBase, data.Dataset):
+    """
+    WICSMMIR Dataset that uses only the images together with a user query.
+    Compatible with torch.utils.data.DataLoader.
+    """
+
+    def __init__(self,
+                 features_root: str,
+                 dataframe_file: str,
+                 query: str,
+                 shuffle: bool = True,
+                 random_seed: int = 1312):
+
+        WICSMMIRDatasetBase.__init__(self,
+                                     features_root=features_root,
+                                     dataframe_file=dataframe_file,
+                                     load_columns=['wikicaps_id'],
+                                     shuffle=shuffle,
+                                     random_seed=random_seed)
+
+        self.query = query
+
+    def __getitem__(self, ds_idx):
+        wikicaps_id = self.dataframe.iloc[ds_idx, 0]
+        bua_feats, bua_bboxes = self._load_features(wikicaps_id)
+
+        # we always return the query here since we want to compute the similarity of each image with the query
+        # this output is the input of the InferenceCollate function
+        return bua_feats, bua_bboxes, wikicaps_id, self.query, ds_idx
+
+    def __len__(self):
+        return int(len(self.dataframe))
+
+
 class CocoDataset(data.Dataset):
     """COCO Custom Dataset compatible with torch.utils.data.DataLoader."""
 
@@ -154,18 +252,37 @@ class CocoDataset(data.Dataset):
 
 
 class CocoImageRetrievalDatasetBase:
-    def __init__(self, captions_json, coco_annotation_ids, num_imgs):
-        self.num_imgs = num_imgs
-
-        self.coco = COCO(captions_json)
-        self.anno_ids = coco_annotation_ids
+    def __init__(self, captions_json, coco_annotation_ids):
+        if isinstance(captions_json, tuple):  # if train caption_train AND caption_val are used (for what ever reason?!)
+            self.coco = (COCO(captions_json[0]), COCO(captions_json[1]))
+        else:
+            self.coco = COCO(captions_json)
+        if isinstance(coco_annotation_ids, tuple):  # if train, this is also a tuple!
+            self.bp = len(coco_annotation_ids[0])
+            self.anno_ids = list(coco_annotation_ids[0]) + list(coco_annotation_ids[1])
+        else:
+            self.bp = len(coco_annotation_ids)
+            self.anno_ids = coco_annotation_ids
 
     def get_image_metadata(self, idx):
         next_img_idx = idx * 5  # in the coco dataset there are 5 captions for every image
+
+        if isinstance(self.coco, tuple):
+            if next_img_idx < self.bp:
+                coco = self.coco[0]
+            else:
+                coco = self.coco[1]
+        else:
+            coco = self.coco
+
         ann_id = self.anno_ids[next_img_idx]
-        coco_img_id = self.coco.anns[ann_id]['image_id']
-        img_metadata = self.coco.imgs[coco_img_id]
+        coco_img_id = coco.anns[ann_id]['image_id']
+        img_metadata = coco.imgs[coco_img_id]
         return coco_img_id, img_metadata
+
+    def __len__(self):
+        # there are 5 captions / annotations per image
+        return len(self.anno_ids) // 5
 
 
 # This has to be outside any class so that it can be pickled for multiproc
@@ -297,8 +414,8 @@ class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase, PreCo
     Custom COCO Dataset that uses pre-computed image embedding
     """
 
-    def __init__(self, captions_json, coco_annotation_ids, num_imgs, config, num_workers=32):
-        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids, num_imgs)
+    def __init__(self, captions_json, coco_annotation_ids, config, num_workers=32):
+        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids)
 
         pre_computed_img_embeddings_root = config['image-retrieval']['pre_computed_img_embeddings_root']
 
@@ -353,12 +470,12 @@ class QueryEncoder:
 
 class PreComputedCocoFeaturesDataset(CocoImageRetrievalDatasetBase, data.Dataset):
     """
-    Custom COCO Dataset that uses only the images together with a user query.
+    Custom COCO Dataset that uses only the images (to be used later together with a user query)
     Compatible with torch.utils.data.DataLoader.
     """
 
-    def __init__(self, imgs_root, img_features_path, captions_json, coco_annotation_ids, query, num_imgs):
-        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids, num_imgs)
+    def __init__(self, imgs_root, img_features_path, captions_json, coco_annotation_ids, query):
+        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids)
 
         self.feats_data_path = os.path.join(img_features_path, 'bu_att')
         self.box_data_path = os.path.join(img_features_path, 'bu_box')
@@ -385,11 +502,8 @@ class PreComputedCocoFeaturesDataset(CocoImageRetrievalDatasetBase, data.Dataset
         img_feat_box = torch.Tensor(img_feat_box)
 
         # we always return the query here since we want to compute the similarity of each image with the query
-        # this output is the input of the CollateFn
+        # this output is the input of the InferenceCollate function
         return img_feat, img_feat_box, img_id, self.query, idx
-
-    def __len__(self):
-        return self.num_imgs
 
 
 class BottomUpFeaturesDataset:
@@ -710,7 +824,7 @@ class Collate:
             return img_features, targets, feat_lengths, cap_lengths, out_boxes, ids
 
 
-def get_loader_single(data_name, split, imgs_root, captions_json, transform, pre_extracted_root=None,
+def get_loader_single(data_name, split, imgs_root=None, captions_json=None, transform=None, pre_extracted_root=None,
                       batch_size=100, shuffle=True,
                       num_workers=2, ids=None, collate_fn=None, **kwargs):
     """Returns torch.utils.data.DataLoader for custom coco dataset."""
@@ -736,6 +850,23 @@ def get_loader_single(data_name, split, imgs_root, captions_json, transform, pre
                                     split=split,
                                     json=captions_json,
                                     transform=transform)
+    elif 'wicsmmir' in data_name:
+        config = kwargs['config']
+        train_set_file = config['dataset']['train_set']
+        test_set_file = config['dataset']['test_set']
+        features_root = config['dataset']['features_root']
+        random_seed = config['dataset']['random_seed']
+
+        if 'train' in split:
+            dataset = WICSMMIRDataset(features_root,
+                                      train_set_file,
+                                      shuffle,
+                                      random_seed)
+        elif 'test' in split:
+            dataset = WICSMMIRDataset(features_root,
+                                      test_set_file,
+                                      shuffle,
+                                      random_seed)
 
     # Data loader
     data_loader = torch.utils.data.DataLoader(dataset=dataset,
@@ -769,64 +900,88 @@ def get_loaders(config, workers, batch_size=None):
     if batch_size is None:
         batch_size = config['training']['bs']
     collate_fn = Collate(config)
-    roots, ids = get_paths(config)
 
     transform = get_transform(data_name, 'train', config)
     preextracted_root = config['image-model']['pre-extracted-features-root'] \
         if 'pre-extracted-features-root' in config['image-model'] else None
+    if data_name == 'wicsmmir':
+        train_loader = get_loader_single(data_name,
+                                         split='train',
+                                         transform=transform,
+                                         batch_size=batch_size,
+                                         shuffle=False,
+                                         num_workers=workers,
+                                         collate_fn=collate_fn,
+                                         config=config)
 
-    train_loader = get_loader_single(data_name, 'train',
-                                     roots['train']['img'],
-                                     roots['train']['cap'],
-                                     transform, ids=ids['train'],
-                                     pre_extracted_root=preextracted_root,
-                                     batch_size=batch_size, shuffle=True,
-                                     num_workers=workers,
-                                     collate_fn=collate_fn, config=config)
+        val_loader = get_loader_single(data_name,
+                                       split='test',
+                                       transform=transform,
+                                       batch_size=batch_size,
+                                       shuffle=False,
+                                       num_workers=workers,
+                                       collate_fn=collate_fn,
+                                       config=config)
 
-    transform = get_transform(data_name, 'val', config)
-    val_loader = get_loader_single(data_name, 'val',
-                                   roots['val']['img'],
-                                   roots['val']['cap'],
-                                   transform, ids=ids['val'],
-                                   pre_extracted_root=preextracted_root,
-                                   batch_size=batch_size, shuffle=False,
-                                   num_workers=workers,
-                                   collate_fn=collate_fn, config=config)
+    else:  # coco and flickr
+        roots, ids = get_paths(config)
+        train_loader = get_loader_single(data_name, 'train',
+                                         roots['train']['img'],
+                                         roots['train']['cap'],
+                                         transform, ids=ids['train'],
+                                         pre_extracted_root=preextracted_root,
+                                         batch_size=batch_size, shuffle=True,
+                                         num_workers=workers,
+                                         collate_fn=collate_fn, config=config)
+
+        transform = get_transform(data_name, 'val', config)
+        val_loader = get_loader_single(data_name, 'val',
+                                       roots['val']['img'],
+                                       roots['val']['cap'],
+                                       transform, ids=ids['val'],
+                                       pre_extracted_root=preextracted_root,
+                                       batch_size=batch_size, shuffle=False,
+                                       num_workers=workers,
+                                       collate_fn=collate_fn, config=config)
 
     return train_loader, val_loader
 
 
-def get_coco_image_retrieval_data(config, query=None, num_workers=32, pre_compute_img_embs=False):
-    # get the directories that contain the coco json files and coco annotation ids (which we may not need, I think)
-    roots, coco_annotation_ids = get_paths(config)
-
+def get_image_retrieval_data(config, query=None, num_workers=32, pre_compute_img_embs=False):
     dataset_name = config['image-retrieval']['dataset']
     batch_size = config['image-retrieval']['batch_size']
     split_name = config['image-retrieval']['split']
-
-    imgs_root = roots[split_name]['img']
-
-    captions_json = roots[split_name]['cap']
-    coco_annotation_ids = coco_annotation_ids[split_name]
-    num_imgs = config['image-retrieval']['num_imgs']
     pre_extracted_img_features_root = config['image-retrieval']['pre_extracted_img_features_root']
-
     use_precomputed_img_embeddings = config['image-retrieval']['use_precomputed_img_embeddings']
-    if use_precomputed_img_embeddings:
-        dataset = PreComputedCocoImageEmbeddingsDataset(captions_json=captions_json,
-                                                        coco_annotation_ids=coco_annotation_ids,
-                                                        num_imgs=num_imgs,
-                                                        config=config,
-                                                        num_workers=num_workers)
-        return dataset
 
-    dataset = PreComputedCocoFeaturesDataset(imgs_root=imgs_root,
-                                             img_features_path=pre_extracted_img_features_root,
-                                             captions_json=captions_json,
-                                             coco_annotation_ids=coco_annotation_ids,
-                                             query=query,
-                                             num_imgs=num_imgs)
+    if dataset_name == 'coco':
+        # get the directories that contain the coco json files and coco annotation ids (which we may not need, I think)
+        roots, coco_annotation_ids = get_paths(config)
+
+        imgs_root = roots[split_name]['img']
+
+        captions_json = roots[split_name]['cap']
+        coco_annotation_ids = coco_annotation_ids[split_name]
+        if use_precomputed_img_embeddings:
+            # We're not using a dataloader for precomputed image embeddings
+            dataset = PreComputedCocoImageEmbeddingsDataset(captions_json=captions_json,
+                                                            coco_annotation_ids=coco_annotation_ids,
+                                                            config=config,
+                                                            num_workers=num_workers)
+            return dataset
+        else:
+            dataset = PreComputedCocoFeaturesDataset(imgs_root=imgs_root,
+                                                     img_features_path=pre_extracted_img_features_root,
+                                                     captions_json=captions_json,
+                                                     coco_annotation_ids=coco_annotation_ids,
+                                                     query=query)
+    elif dataset_name == 'wicsmmir':
+        dataframe_file = config['dataset'][f'{split_name}_set']
+        dataset = WICSMMIRImageRetrievalDataset(features_root=config['dataset']['features_root'],
+                                                dataframe_file=dataframe_file,
+                                                query=query)
+    else:
+        raise NotImplementedError("Currently only COCO and WICSMMIR are supported!")
 
     # this creates the batches which get passed to the model (inside the query gets repeated or not based on the config)
     collate_fn = InferenceCollate(config, pre_compute_img_embs)
@@ -846,19 +1001,30 @@ def get_test_loader(config, workers, split_name='test', batch_size=None):
     if batch_size is None:
         batch_size = config['training']['bs']
     collate_fn = Collate(config)
-    # Build Dataset Loader
-    roots, ids = get_paths(config)
 
     pre_extracted_root = config['image-model']['pre-extracted-features-root'] \
         if 'pre-extracted-features-root' in config['image-model'] else None
 
     transform = get_transform(data_name, split_name, config)
-    test_loader = get_loader_single(data_name, split_name,
-                                    imgs_root=roots[split_name]['img'],
-                                    captions_json=roots[split_name]['cap'],
-                                    transform=transform, ids=ids[split_name],
-                                    pre_extracted_root=pre_extracted_root,
-                                    batch_size=batch_size, shuffle=False,
-                                    num_workers=workers,
-                                    collate_fn=collate_fn, config=config)
+
+    # Build Dataset Loader
+    if data_name == 'wicsmmir':
+        test_loader = get_loader_single(data_name,
+                                        split='test',
+                                        transform=transform,
+                                        batch_size=batch_size,
+                                        shuffle=False,
+                                        num_workers=workers,
+                                        collate_fn=collate_fn,
+                                        config=config)
+    else:  # coco and flickr
+        roots, ids = get_paths(config)
+        test_loader = get_loader_single(data_name, split_name,
+                                        imgs_root=roots[split_name]['img'],
+                                        captions_json=roots[split_name]['cap'],
+                                        transform=transform, ids=ids[split_name],
+                                        pre_extracted_root=pre_extracted_root,
+                                        batch_size=batch_size, shuffle=False,
+                                        num_workers=workers,
+                                        collate_fn=collate_fn, config=config)
     return test_loader

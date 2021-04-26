@@ -1,4 +1,3 @@
-import pickle
 import os
 import time
 import shutil
@@ -67,8 +66,7 @@ def main():
     tb_logger = SummaryWriter(log_dir=opt.logger_name, comment='')
 
     # Load data loaders
-    train_loader, val_loader = data.get_loaders(
-        config, opt.workers)
+    train_loader, val_loader = data.get_loaders(config, opt.workers)
     # test_loader = data.get_test_loader(config, vocab=vocab, workers=4, split_name='test')
 
     # Construct the model
@@ -157,8 +155,13 @@ def main():
         model.cuda()
     model.train()
 
-    # load the ndcg scorer
-    ndcg_val_scorer = DCG(config, len(val_loader.dataset), 'val', rank=25, relevance_methods=['rougeL', 'spice'])
+    wicsmmir = config['dataset']['name'] == 'wicsmmir'
+
+    if not wicsmmir:
+        # load the ndcg scorer
+        ndcg_val_scorer = DCG(config, len(val_loader.dataset), 'val', rank=25, relevance_methods=['rougeL', 'spice'])
+    else:
+        ndcg_val_scorer = None  # we cant compute (n)dcg on wicsmmir
     # ndcg_test_scorer = DCG(config, len(test_loader.dataset), 'test', rank=25, relevance_methods=['rougeL', 'spice'])
 
     # Train the Model
@@ -177,7 +180,7 @@ def main():
 
         # evaluate on validation set
         rsum, ndcg_sum = validate(val_loader, model, tb_logger, measure=config['training']['measure'], log_step=opt.log_step,
-                        ndcg_scorer=ndcg_val_scorer, alignment_mode=alignment_mode)
+                        ndcg_scorer=ndcg_val_scorer, alignment_mode=alignment_mode, wicsmmir=wicsmmir)
 
         # remember best R@ sum and save checkpoint
         is_best_rsum = rsum > best_rsum
@@ -261,16 +264,17 @@ def train(opt, train_loader, model, optimizer, epoch, tb_logger, val_loader, tes
 
         # validate at every val_step
         if model.Eiters % opt.val_step == 0:
-            validate(val_loader, model, tb_logger, measure=measure, log_step=opt.log_step, ndcg_scorer=ndcg_val_scorer, alignment_mode=alignment_mode)
+            # validate(val_loader, model, tb_logger, measure=measure, log_step=opt.log_step, ndcg_scorer=ndcg_val_scorer, alignment_mode=alignment_mode, max_cap_len=None, max_img_len=None, wicsmmir=True)
+            print("Skipping Validation...")
 
         # if model.Eiters % opt.test_step == 0:
         #     test(test_loader, model, tb_logger, measure=measure, log_step=opt.log_step, ndcg_scorer=ndcg_test_scorer)
 
 
-def validate(val_loader, model, tb_logger, measure='cosine', log_step=10, ndcg_scorer=None, alignment_mode=None):
+def validate(val_loader, model, tb_logger, measure='cosine', log_step=10, ndcg_scorer=None, alignment_mode=None, wicsmmir=False, max_cap_len=None, max_img_len=None):
     # compute the encoding for all the validation images and captions
     img_embs, cap_embs, img_lenghts, cap_lenghts = encode_data(
-        model, val_loader, log_step, logging.info)
+        model, val_loader, log_step, logging.info, max_cap_len, max_img_len)
 
     # initialize similarity matrix evaluator
     sim_matrix_fn = AlignmentContrastiveLoss(aggregation=alignment_mode, return_similarity_mat=True) if alignment_mode is not None else None
@@ -280,35 +284,54 @@ def validate(val_loader, model, tb_logger, measure='cosine', log_step=10, ndcg_s
     elif measure == 'dot':
         sim_fn = dot_sim
 
-    # caption retrieval
-    (r1, r5, r10, medr, meanr, mean_rougel_ndcg, mean_spice_ndcg) = i2t(img_embs, cap_embs, img_lenghts, cap_lenghts, measure=measure, ndcg_scorer=ndcg_scorer, sim_function=sim_matrix_fn)
-    logging.info("Image to text: %.1f, %.1f, %.1f, %.1f, %.1f, ndcg_rouge=%.4f ndcg_spice=%.4f" %
-                 (r1, r5, r10, medr, meanr, mean_rougel_ndcg, mean_spice_ndcg))
+    if wicsmmir:
+        # we need this to fit in cuda memory
+        cap_batches, im_batches = 3, 3  # works with train frac .95
+    else:
+        cap_batches, im_batches = 1, 1
+
+    if not wicsmmir:
+        # caption retrieval
+        (r1, r5, r10, medr, meanr, mean_rougel_ndcg, mean_spice_ndcg) = i2t(img_embs, cap_embs, img_lenghts, cap_lenghts, measure=measure, ndcg_scorer=ndcg_scorer, sim_function=sim_matrix_fn, wicsmmir=wicsmmir, cap_batches=cap_batches)
+        logging.info("Image to text: %.1f, %.1f, %.1f, %.1f, %.1f, ndcg_rouge=%.4f ndcg_spice=%.4f" %
+                     (r1, r5, r10, medr, meanr, mean_rougel_ndcg, mean_spice_ndcg))
+    else:
+        r1, r5, r10 = 0, 0, 0
+
     # image retrieval
-    (r1i, r5i, r10i, medri, meanr, mean_rougel_ndcg_i, mean_spice_ndcg_i) = t2i(
-        img_embs, cap_embs, img_lenghts, cap_lenghts, ndcg_scorer=ndcg_scorer, measure=measure, sim_function=sim_matrix_fn)
+    (r1i, r5i, r10i, medri, meanri, mean_rougel_ndcg_i, mean_spice_ndcg_i) = t2i(
+        img_embs, cap_embs, img_lenghts, cap_lenghts, ndcg_scorer=ndcg_scorer, measure=measure, sim_function=sim_matrix_fn, wicsmmir=wicsmmir, im_batches=im_batches)
 
     logging.info("Text to image: %.1f, %.1f, %.1f, %.1f, %.1f, ndcg_rouge=%.4f ndcg_spice=%.4f" %
-                 (r1i, r5i, r10i, medri, meanr, mean_rougel_ndcg_i, mean_spice_ndcg_i))
+                 (r1i, r5i, r10i, medri, meanri, mean_rougel_ndcg_i, mean_spice_ndcg_i))
+
     # sum of recalls to be used for early stopping
     currscore = r1 + r5 + r10 + r1i + r5i + r10i
-    spice_ndcg_sum = mean_spice_ndcg + mean_spice_ndcg_i
+    if not wicsmmir:
+        spice_ndcg_sum = mean_spice_ndcg + mean_spice_ndcg_i
+    else:
+        spice_ndcg_sum = 0
 
     # record metrics in tensorboard
-    tb_logger.add_scalar('r1', r1, model.Eiters)
-    tb_logger.add_scalar('r5', r5, model.Eiters)
-    tb_logger.add_scalar('r10', r10, model.Eiters)
-    tb_logger.add_scalars('mean_ndcg', {'rougeL': mean_rougel_ndcg, 'spice': mean_spice_ndcg}, model.Eiters)
-    tb_logger.add_scalar('medr', medr, model.Eiters)
-    tb_logger.add_scalar('meanr', meanr, model.Eiters)
+    if not wicsmmir:
+        tb_logger.add_scalar('r1', r1, model.Eiters)
+        tb_logger.add_scalar('r5', r5, model.Eiters)
+        tb_logger.add_scalar('r10', r10, model.Eiters)
+        tb_logger.add_scalars('mean_ndcg', {'rougeL': mean_rougel_ndcg, 'spice': mean_spice_ndcg}, model.Eiters)
+        tb_logger.add_scalar('medr', medr, model.Eiters)
+        tb_logger.add_scalar('meanr', meanr, model.Eiters)
+
     tb_logger.add_scalar('r1i', r1i, model.Eiters)
     tb_logger.add_scalar('r5i', r5i, model.Eiters)
     tb_logger.add_scalar('r10i', r10i, model.Eiters)
-    tb_logger.add_scalars('mean_ndcg_i', {'rougeL': mean_rougel_ndcg_i, 'spice': mean_spice_ndcg_i}, model.Eiters)
+    if not wicsmmir:
+        tb_logger.add_scalars('mean_ndcg_i', {'rougeL': mean_rougel_ndcg_i, 'spice': mean_spice_ndcg_i}, model.Eiters)
     tb_logger.add_scalar('medri', medri, model.Eiters)
-    tb_logger.add_scalar('meanr', meanr, model.Eiters)
+    tb_logger.add_scalar('meanri', meanri, model.Eiters)
     tb_logger.add_scalar('rsum', currscore, model.Eiters)
-    tb_logger.add_scalar('spice_ndcg_sum', spice_ndcg_sum, model.Eiters)
+
+    if not wicsmmir:
+        tb_logger.add_scalar('spice_ndcg_sum', spice_ndcg_sum, model.Eiters)
 
     return currscore, spice_ndcg_sum
 
