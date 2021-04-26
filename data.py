@@ -186,8 +186,10 @@ class PreComputedImageEmbeddingsData:
                  fn_suffix: str = '',
                  pre_fetch_in_memory: bool = False,
                  random_pre_fetch_fraction: float = 1.,  # TODO
-                 num_pre_fetch_workers: int = 8):
-
+                 num_pre_fetch_workers: int = 8,
+                 pool: Pool = None,
+                 subset=True):
+        self.is_subset = subset
         self.pre_computed_img_embeddings_root = pre_computed_img_embeddings_root
         assert os.path.lexists(pre_computed_img_embeddings_root) and os.path.isdir(pre_computed_img_embeddings_root), \
             f"Cannot read directory {pre_computed_img_embeddings_root}!"
@@ -215,7 +217,10 @@ class PreComputedImageEmbeddingsData:
                 f"Found {len(self.__file_names)} pre-computed image embeddings in {pre_computed_img_embeddings_root}!")
 
         # setup pool
-        self.pool = Pool(self.num_pre_fetch_workers)
+        if pool is None:
+            self.pool = Pool(self.num_pre_fetch_workers)
+        else:
+            self.pool = pool
 
         self.img_embs = {}
         if pre_fetch_in_memory:
@@ -247,7 +252,9 @@ class PreComputedImageEmbeddingsData:
                                                 fn_prefix=self.fn_prefix,
                                                 fn_suffix=self.fn_suffix,
                                                 pre_fetch_in_memory=False,
-                                                num_pre_fetch_workers=self.num_pre_fetch_workers)
+                                                num_pre_fetch_workers=self.num_pre_fetch_workers,
+                                                pool=self.pool,
+                                                subset=True)
         if len(self.img_embs) != 0:
             subset.img_embs = {img_id: self.img_embs[img_id] for img_id in image_ids}
             assert len(subset.img_embs) == len(subset) == len(image_ids)
@@ -263,6 +270,12 @@ class PreComputedImageEmbeddingsData:
         """
         return self.image_ids[idx]
 
+    def __close_pool(self):
+        if self.pool is not None:
+            self.pool.close()
+            self.pool.terminate()
+            self.pool.join()
+
     def __len__(self):
         return len(self.__file_names)
 
@@ -271,11 +284,12 @@ class PreComputedImageEmbeddingsData:
 
     def __del__(self):
         print("Closing PreComputedImageEmbeddingsDatasetBase pool")
-        # FIXME self.pool --> unresolved?! why
-        if self.pool is not None:
-            self.pool.close()
-            self.pool.terminate()
-            self.pool.join()
+        try:
+            # FIXME self.pool --> unresolved?! why
+            if not self.is_subset:
+                self.__close_pool()
+        except Exception:
+            pass
 
 
 class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase, PreComputedImageEmbeddingsData):
