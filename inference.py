@@ -22,10 +22,9 @@ def persist_img_embs(config, data_loader, dataset_indices, numpy_img_emb):
         dst_root.mkdir(parents=True, exist_ok=True)
 
     assert len(dataset_indices) == len(numpy_img_emb)
-    img_names = get_image_names(dataset_indices, data_loader)
-    # TODO do we want to store them in one big npz?
-    for idx in range(len(img_names)):
-        dst = dst_root.joinpath(img_names[idx] + '.npz')
+    img_ids = get_image_ids(dataset_indices, data_loader)
+    for idx in range(len(img_ids)):
+        dst = dst_root.joinpath(img_ids[idx] + '.npz')
         if dst.exists():
             continue
         np.savez_compressed(str(dst), img_emb=numpy_img_emb[idx])
@@ -142,12 +141,32 @@ def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config):
     return sorted_distance_indices
 
 
-def get_image_names(dataset_indices, dataloader) -> List[str]:
+# TODO hardcoded is ugly and this is actually not mentioned anywhere due to laziness...
+def build_coco_img_id(coco_id: int, prefix: str = 'COCO_'):
+    res = str(coco_id)
+    # coco image ids are filled with 0 until it's a 12 char string
+    while len(res) != 12:
+        res = '0' + res
+
+    return prefix + res
+
+
+def get_image_ids(dataset_indices, dataloader) -> List[str]:
+    # WICSMMIR
     if isinstance(dataloader.dataset, WICSMMIRImageRetrievalDataset):
         imgs = dataloader.dataset.dataframe.iloc[dataset_indices]['wikicaps_id'].to_numpy().tolist()
         return [str(i) for i in imgs]
+
+    # COCO
     if isinstance(dataloader.dataset, CocoImageRetrievalDatasetBase):
-        return [str(dataloader.dataset.get_image_metadata(idx)[1]['file_name']) for idx in dataset_indices]
+        ds = dataloader.dataset
+    elif isinstance(dataloader, CocoImageRetrievalDatasetBase):
+        ds = dataloader
+    else:
+        # TODO
+        raise NotImplementedError("Only COCO and WICSMMIR are supported!")
+
+    return [build_coco_img_id(ds.get_image_metadata(idx)[0]) for idx in dataset_indices]
 
 
 def load_precomputed_image_embeddings(config, num_workers):
@@ -185,12 +204,11 @@ def top_k_image_retrieval(opts, config, checkpoint) -> List[str]:
 
     else:
         # returns a Dataloader of a PreComputedCocoFeaturesDataset
-        data_loader = get_image_retrieval_data(config,
-                                               query=opts.query,
-                                               num_workers=opts.num_data_workers)
-        dataset = data_loader.dataset
+        dataset = get_image_retrieval_data(config,
+                                           query=opts.query,
+                                           num_workers=opts.num_data_workers)
         # encode the data (i.e. compute the embeddings / TE outputs for the images and query)
-        img_embs, query_embs, img_lengths, query_lengths = encode_data_for_inference(model, data_loader)
+        img_embs, query_embs, img_lengths, query_lengths = encode_data_for_inference(model, dataset)
 
     if opts.device == "cuda":
         torch.cuda.empty_cache()
@@ -202,7 +220,7 @@ def top_k_image_retrieval(opts, config, checkpoint) -> List[str]:
     top_k_indices = distance_sorted_indices[:opts.top_k]
 
     # get the image names
-    top_k_images = get_image_names(top_k_indices, dataset)
+    top_k_images = get_image_ids(top_k_indices, dataloader=dataset)
     return top_k_images
 
 
@@ -252,7 +270,8 @@ if __name__ == '__main__':
     parser.add_argument('--query', type=str, required='--pre_compute_img_embeddings' not in sys.argv)
     parser.add_argument('--num_data_workers', type=int, default=8)
     parser.add_argument('--top_k', type=int, default=100)
-    parser.add_argument('--dataset', type=str, choices=['coco', 'wicsmmir'], default='coco')  # TODO support other datasets
+    parser.add_argument('--dataset', type=str, choices=['coco', 'wicsmmir'],
+                        default='coco')  # TODO support other datasets
     parser.add_argument('--config', type=str, default='configs/teran_coco_MrSw_IR.yaml', help="Which configuration to "
                                                                                               "use for overriding the"
                                                                                               " checkpoint "
