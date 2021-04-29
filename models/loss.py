@@ -71,10 +71,18 @@ class AlignmentContrastiveLoss(Contrastive):
     Compute contrastive loss
     """
 
-    def __init__(self, margin=0, measure=False, max_violation=False, aggregation='sum-max-sentences', return_similarity_mat=False):
+    def __init__(self, margin=0,
+                 measure=False,
+                 max_violation=False,
+                 aggregation='sum-max-sentences',
+                 return_alignment_mat=False,
+                 return_aggregated_similarity_mat=False,
+                 return_loss=True):
         super(AlignmentContrastiveLoss, self).__init__(margin, measure, max_violation)
         self.aggregation = aggregation
-        self.return_similarity_mat = return_similarity_mat
+        self.return_alignment_mat = return_alignment_mat
+        self.return_aggregated_similarity_mat = return_aggregated_similarity_mat
+        self.return_loss = return_loss
 
     def forward(self, im_set, s_seq, im_len, s_len):
         # im_set = im_set.permute(1, 0, 2)    # B x S_im x dim
@@ -145,8 +153,15 @@ class AlignmentContrastiveLoss(Contrastive):
 
             aggr_similarity = new_alignments.sum(2)
 
-        if self.return_similarity_mat:
+        if self.return_aggregated_similarity_mat and not self.return_alignment_mat:
             return aggr_similarity
+        elif self.return_alignment_mat and not self.return_aggregated_similarity_mat:
+            return alignments
+        elif self.return_alignment_mat and self.return_aggregated_similarity_mat:
+            return aggr_similarity, alignments
+        elif self.return_loss:
+            loss = self.compute_contrastive_loss(aggr_similarity)
+            return loss
         else:
             loss = self.compute_contrastive_loss(aggr_similarity)
             return loss

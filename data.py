@@ -1,4 +1,4 @@
-from __future__ import annotations
+#from __future__ import annotations
 
 import glob
 import json as jsonmod
@@ -6,6 +6,7 @@ import os
 import pickle
 import time
 from multiprocessing import Pool
+from pathlib import Path
 from typing import List
 
 import numpy as np
@@ -356,7 +357,8 @@ class PreComputedImageEmbeddingsData:
         self.img_embs = dict(res)
         print(f'Loading {len(self.__file_names)} image embeddings took {time.time() - start} seconds')
 
-    def get_subset(self, image_ids: List[str], pre_fetch_in_memory: bool = False) -> PreComputedImageEmbeddingsData:
+    # noinspection PyUnresolvedReferences
+    def get_subset(self, image_ids: List[str], pre_fetch_in_memory: bool = False): #-> PreComputedImageEmbeddingsData:
         """
         Returns a subset containing the image embeddings for all ids in image_ids
         :param image_ids: list of image ids
@@ -419,9 +421,8 @@ class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase, PreCo
 
         pre_computed_img_embeddings_root = config['image-retrieval']['pre_computed_img_embeddings_root']
 
-        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids, num_imgs)
+        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids)
         PreComputedImageEmbeddingsData.__init__(self, pre_computed_img_embeddings_root,
-                                                num_images=num_imgs,
                                                 pre_fetch_in_memory=True,
                                                 num_pre_fetch_workers=num_workers)
 

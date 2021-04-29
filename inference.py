@@ -105,7 +105,7 @@ def encode_data_for_inference(model: TERAN, data_loader, log_step=10, logging=pr
 def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config):
     # initialize similarity matrix evaluator
     sim_matrix_fn = AlignmentContrastiveLoss(aggregation=config['image-retrieval']['alignment_mode'],
-                                             return_similarity_mat=True)
+                                             return_aggregated_similarity_mat=True)
     start_time = time.time()
     img_emb_batches = 1  # TODO config / calc
     img_embs_per_batch = img_embs.size(0) // img_emb_batches  # TODO config variable

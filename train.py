@@ -277,7 +277,8 @@ def validate(val_loader, model, tb_logger, measure='cosine', log_step=10, ndcg_s
         model, val_loader, log_step, logging.info, max_cap_len, max_img_len)
 
     # initialize similarity matrix evaluator
-    sim_matrix_fn = AlignmentContrastiveLoss(aggregation=alignment_mode, return_similarity_mat=True) if alignment_mode is not None else None
+    sim_matrix_fn = AlignmentContrastiveLoss(aggregation=alignment_mode,
+                                             return_aggregated_similarity_mat=True) if alignment_mode is not None else None
 
     if measure == 'cosine':
         sim_fn = cosine_sim

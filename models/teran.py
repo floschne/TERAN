@@ -150,7 +150,8 @@ class TERAN(torch.nn.Module):
             self.alignment_criterion = AlignmentContrastiveLoss(margin=config['training']['margin'],
                                                                 measure=config['training']['measure'],
                                                                 max_violation=config['training']['max-violation'],
-                                                                aggregation=config['training']['alignment-mode'])
+                                                                aggregation=config['training']['alignment-mode'],
+                                                                return_loss=True)
         if 'matching' in loss_type:
             self.matching_criterion = ContrastiveLoss(margin=config['training']['margin'],
                                                       measure=config['training']['measure'],

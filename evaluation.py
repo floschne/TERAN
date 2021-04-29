@@ -127,7 +127,7 @@ def evalrank(config, checkpoint, split='dev', fold5=False, eval_t2i=True, eval_i
 
     # initialize similarity matrix evaluator
     sim_matrix_fn = AlignmentContrastiveLoss(aggregation=config['training']['alignment-mode'],
-                                             return_similarity_mat=True) if config['training'][
+                                             return_aggregated_similarity_mat=True) if config['training'][
                                                                                 'loss-type'] == 'alignment' else None
 
     print('Computing results...')
@@ -137,6 +137,9 @@ def evalrank(config, checkpoint, split='dev', fold5=False, eval_t2i=True, eval_i
         # for wicsmmir v1 test set this is known (computed before)
         mil = 37
         mcl = 236
+    elif config['dataset']['name'] == 'coco':
+        mil = 37
+        mcl = 88
     else:
         mil = None
         mcl = None
