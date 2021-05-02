@@ -163,7 +163,6 @@ class WICSMMIRImageRetrievalDataset(WICSMMIRDatasetBase, data.Dataset):
                  query: str,
                  shuffle: bool = True,
                  random_seed: int = 1312):
-
         WICSMMIRDatasetBase.__init__(self,
                                      features_root=features_root,
                                      dataframe_file=dataframe_file,
@@ -311,6 +310,7 @@ class PreComputedImageEmbeddingsData:
                  num_pre_fetch_workers: int = 8,
                  pool: Pool = None,
                  subset=True):
+
         self.is_subset = subset
         self.pre_computed_img_embeddings_root = pre_computed_img_embeddings_root
         assert os.path.lexists(pre_computed_img_embeddings_root) and os.path.isdir(pre_computed_img_embeddings_root), \
@@ -356,8 +356,10 @@ class PreComputedImageEmbeddingsData:
             print("Image Embeddings already in memory!")
             return
         start = time.time()
-        print(f'Parallel loading of {len(self.__file_names)} pre-computed image embeddings started...')
-        res = self.pool.map(load_img_emb, self.__file_names.items())
+        print(f'Parallel loading of {len(self.__file_names)} pre-computed image embeddings '
+              f'with {self.num_pre_fetch_workers} workers started...'
+              )
+        res = list(tqdm.tqdm(self.pool.imap(load_img_emb, self.__file_names.items()), total=len(self.__file_names)))
         self.img_embs = dict(res)
         print(f'Loading {len(self.__file_names)} image embeddings took {time.time() - start} seconds')
 
@@ -409,7 +411,7 @@ class PreComputedImageEmbeddingsData:
         try:
             # FIXME self.pool --> unresolved?! why
             if not self.is_subset:
-                print("Closing PreComputedImageEmbeddingsDatasetBase pool")
+                print("Closing PreComputedImageEmbeddingsData pool")
                 self.__close_pool()
         except Exception:
             pass
