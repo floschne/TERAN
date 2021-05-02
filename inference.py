@@ -106,9 +106,16 @@ def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config):
     # initialize similarity matrix evaluator
     sim_matrix_fn = AlignmentContrastiveLoss(aggregation=config['image-retrieval']['alignment_mode'],
                                              return_aggregated_similarity_mat=True)
-    start_time = time.time()
-    img_emb_batches = 1  # TODO config / calc
-    img_embs_per_batch = img_embs.size(0) // img_emb_batches  # TODO config variable
+
+    img_embs_per_batch = config['image-retrieval']['batch_size']
+    num_imgs = img_embs.size(0)
+    img_emb_batches = num_imgs // img_embs_per_batch
+    img_embs_per_batch = [img_embs_per_batch] * img_emb_batches
+
+    # batch the image embs so that the last batch contains the remaining num_imgs % img_embs_per_batch images
+    if num_imgs % img_embs_per_batch[0] != 0:
+        img_embs_per_batch = img_embs_per_batch + [num_imgs % img_embs_per_batch[0]]
+        img_emb_batches += 1
 
     # distances storage
     distances = None
@@ -119,11 +126,12 @@ def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config):
     query_length_batch = [query_lengths[0] if isinstance(query_lengths, list) else query_lengths for _ in range(1)]
     query_emb_batch.cuda()
 
+    start_time = time.time()
     # batch-wise compute the alignment distance between the images and the query
-    for i in trange(img_emb_batches):
+    for i in trange(img_emb_batches, desc='Computing distances...'):
         # create the current batch
-        img_embs_batch = img_embs[i * img_embs_per_batch:(i + 1) * img_embs_per_batch]
-        img_embs_length_batch = [img_lengths for _ in range(img_embs_per_batch)]
+        img_embs_batch = img_embs[i * img_embs_per_batch[i]:(i + 1) * img_embs_per_batch[i]]
+        img_embs_length_batch = [img_lengths for _ in range(img_embs_per_batch[i])]
         img_embs_batch.cuda()
 
         # compute and pool the similarity matrices to get the global distance between the image and the query
