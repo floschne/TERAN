@@ -288,11 +288,15 @@ class CocoImageRetrievalDatasetBase:
 
 # This has to be outside any class so that it can be pickled for multiproc
 def load_img_emb(args):
-    # just return the query and the img embedding
     img_id, file_name = args
-    npz = np.load(file_name)
-    img_emd = npz.get('img_emb')
-    return img_id, img_emd
+    try:
+        # just return the query and the img embedding
+        npz = np.load(file_name)
+        img_emd = npz.get('img_emb')
+        return img_id, img_emd
+    except Exception as e:
+        print(f"Error while reading file {file_name}!\n{e}")
+        raise e
 
 
 class PreComputedImageEmbeddingsData:
