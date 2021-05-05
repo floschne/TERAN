@@ -8,10 +8,11 @@ from typing import List
 import numpy as np
 import torch
 import yaml
+# noinspection PyUnresolvedReferences
+from data import get_image_retrieval_data, QueryEncoder, WICSMMIRImageRetrievalDataset, CocoImageRetrievalDatasetBase, \
+    FlickrImageRetrievalDatasetBase
 from tqdm import tqdm, trange
 
-# noinspection PyUnresolvedReferences
-from data import get_image_retrieval_data, QueryEncoder, WICSMMIRImageRetrievalDataset, CocoImageRetrievalDatasetBase
 from models.loss import AlignmentContrastiveLoss
 from models.teran import TERAN
 from utils import AverageMeter, LogCollector
@@ -166,16 +167,18 @@ def get_image_ids(dataset_indices, dataloader) -> List[str]:
         imgs = dataloader.dataset.dataframe.iloc[dataset_indices]['wikicaps_id'].to_numpy().tolist()
         return [str(i) for i in imgs]
 
-    # COCO
+    # COCO and F30k
     if isinstance(dataloader.dataset, CocoImageRetrievalDatasetBase):
-        ds = dataloader.dataset
+        return [build_coco_img_id(dataloader.dataset.get_image_metadata(idx)[0]) for idx in dataset_indices]
     elif isinstance(dataloader, CocoImageRetrievalDatasetBase):
-        ds = dataloader
-    else:
-        # TODO
-        raise NotImplementedError("Only COCO and WICSMMIR are supported!")
+        return [build_coco_img_id(dataloader.get_image_metadata(idx)[0]) for idx in dataset_indices]
 
-    return [build_coco_img_id(ds.get_image_metadata(idx)[0]) for idx in dataset_indices]
+    # F30k
+    if isinstance(dataloader.dataset, FlickrImageRetrievalDatasetBase) or \
+            isinstance(dataloader, FlickrImageRetrievalDatasetBase):
+        return [str(idx) for idx in dataset_indices]  # in F30k the image_ids are simply counts from 0..len(f30k)
+    else:
+        raise NotImplementedError("Only COCO, F30k, and WICSMMIR are supported!")
 
 
 def load_precomputed_image_embeddings(config, num_workers):
@@ -242,8 +245,7 @@ def prepare_model_checkpoint_and_config(opts):
     with open(opts.config, 'r') as yml_file:
         loaded_config = yaml.load(yml_file)
         # Override some mandatory things in the configuration
-        model_checkpoint_config['dataset']['images-path'] = loaded_config['dataset']['images-path']
-        model_checkpoint_config['dataset']['data'] = loaded_config['dataset']['data']
+        model_checkpoint_config['dataset'] = loaded_config['dataset']
         model_checkpoint_config['image-retrieval'] = loaded_config['image-retrieval']
 
     return model_checkpoint_config, checkpoint
@@ -280,7 +282,7 @@ if __name__ == '__main__':
     parser.add_argument('--query', type=str, required='--pre_compute_img_embeddings' not in sys.argv)
     parser.add_argument('--num_data_workers', type=int, default=8)
     parser.add_argument('--top_k', type=int, default=100)
-    parser.add_argument('--dataset', type=str, choices=['coco', 'wicsmmir'],
+    parser.add_argument('--dataset', type=str, choices=['coco', 'wicsmmir', 'f30k'],
                         default='coco')  # TODO support other datasets
     parser.add_argument('--config', type=str, default='configs/teran_coco_MrSw_IR.yaml', help="Which configuration to "
                                                                                               "use for overriding the"

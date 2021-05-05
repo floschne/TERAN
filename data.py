@@ -253,6 +253,9 @@ class CocoDataset(data.Dataset):
 
 class CocoImageRetrievalDatasetBase:
     def __init__(self, captions_json, coco_annotation_ids):
+        # for some splits captions_json and coco_annotation_ids are tuples due to the (strange) structure of
+        # the provided data. (two coco datasets with different json files have to be loaded)
+
         if isinstance(captions_json, tuple):  # if train caption_train AND caption_val are used (for what ever reason?!)
             self.coco = (COCO(captions_json[0]), COCO(captions_json[1]))
         else:
@@ -265,8 +268,14 @@ class CocoImageRetrievalDatasetBase:
             self.anno_ids = coco_annotation_ids
 
     def get_image_metadata(self, idx):
+        """
+        returns the coco image id and the metadata containing the width and the height of the respective image
+        :param idx: returns the idx'th image metadata
+        """
         next_img_idx = idx * 5  # in the coco dataset there are 5 captions for every image
 
+        # for some splits coco is a tuple due to the (strange) structure of the provided data. (two coco datasets with
+        # different json files have to be loaded)
         if isinstance(self.coco, tuple):
             if next_img_idx < self.bp:
                 coco = self.coco[0]
@@ -283,6 +292,68 @@ class CocoImageRetrievalDatasetBase:
     def __len__(self):
         # there are 5 captions / annotations per image
         return len(self.anno_ids) // 5
+
+
+class FlickrImageRetrievalDatasetBase:
+    def __init__(self, dataset_json: str, sizes_pkl: str):
+        with open(sizes_pkl, 'rb') as f:
+            sizes = pickle.load(f)
+
+        with open(dataset_json, 'r') as f:
+            ds = jsonmod.load(f)['images']
+
+        self.images = []
+        for idx, i in enumerate(ds):
+            i['width'] = sizes[idx][0]
+            i['height'] = sizes[idx][1]
+            self.images.append(i)
+
+    def get_image_metadata(self, idx):
+        """
+        returns the idx'ths image metadata
+        """
+        metadata = self.images[idx]
+        return metadata['imgid'], metadata
+
+    def __len__(self):
+        return len(self.images)
+
+
+class PreComputedFlickrFeaturesDataset(FlickrImageRetrievalDatasetBase, data.Dataset):
+    """
+    Custom Flickr30k Dataset that uses only the images (to be used later together with a user query)
+    Compatible with torch.utils.data.DataLoader.
+    """
+
+    def __init__(self, img_features_path: str, dataset_json: str, sizes_pkl: str, query: str):
+        FlickrImageRetrievalDatasetBase.__init__(self, dataset_json, sizes_pkl)
+
+        self.feats_data_path = os.path.join(img_features_path, 'bu_att')
+        self.box_data_path = os.path.join(img_features_path, 'bu_box')
+        self.query = query
+
+    def __getitem__(self, idx):
+        """
+        This function returns a tuple that is further passed to collate_fn
+        """
+        img_id, img_metadata = self.get_image_metadata(idx)
+        img_size = np.array([img_metadata['width'], img_metadata['height']])
+
+        img_feat_path = os.path.join(self.feats_data_path, '{}.npz'.format(img_id))
+        img_box_path = os.path.join(self.box_data_path, '{}.npy'.format(img_id))
+
+        img_feat = np.load(img_feat_path)['feat']
+        img_feat_box = np.load(img_box_path)
+
+        # normalize box
+        img_feat_box = img_feat_box / np.tile(img_size, 2)
+
+        img_feat = torch.Tensor(img_feat)
+        img_feat_box = torch.Tensor(img_feat_box)
+
+        # we always return the query here since we want to compute the similarity of each image with the query
+        # this output is the input of the InferenceCollate function
+        return img_feat, img_feat_box, img_id, self.query, idx
 
 
 # This has to be outside any class so that it can be pickled for multiproc
@@ -424,15 +495,29 @@ class PreComputedCocoImageEmbeddingsDataset(CocoImageRetrievalDatasetBase, PreCo
 
     def __init__(self, captions_json, coco_annotation_ids, config, num_workers=32):
         CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids)
-
-        pre_computed_img_embeddings_root = config['image-retrieval']['pre_computed_img_embeddings_root']
-
-        CocoImageRetrievalDatasetBase.__init__(self, captions_json, coco_annotation_ids)
-        PreComputedImageEmbeddingsData.__init__(self, pre_computed_img_embeddings_root,
+        PreComputedImageEmbeddingsData.__init__(self, config['image-retrieval']['pre_computed_img_embeddings_root'],
                                                 pre_fetch_in_memory=True,
                                                 num_pre_fetch_workers=num_workers)
 
-        self.pre_computed_img_embeddings_root = pre_computed_img_embeddings_root
+        self.pre_computed_img_embeddings_root = config['image-retrieval']['pre_computed_img_embeddings_root']
+
+    def __len__(self):
+        return PreComputedImageEmbeddingsData.__len__(self)
+
+
+class PreComputedFlickrImageEmbeddingsDataset(FlickrImageRetrievalDatasetBase, PreComputedImageEmbeddingsData):
+    """
+    Custom Flickr30k Dataset that uses pre-computed image embedding
+    """
+
+    def __init__(self, dataset_json: str, sizes_pkl: str, config, num_workers=32):
+        FlickrImageRetrievalDatasetBase.__init__(self, dataset_json=dataset_json, sizes_pkl=sizes_pkl)
+        PreComputedImageEmbeddingsData.__init__(self,
+                                                config['image-retrieval']['pre_computed_img_embeddings_root'],
+                                                pre_fetch_in_memory=True,
+                                                num_pre_fetch_workers=num_workers)
+
+        self.pre_computed_img_embeddings_root = config['image-retrieval']['pre_computed_img_embeddings_root']
 
     def __len__(self):
         return PreComputedImageEmbeddingsData.__len__(self)
@@ -961,34 +1046,50 @@ def get_image_retrieval_data(config, query=None, num_workers=32, pre_compute_img
     pre_extracted_img_features_root = config['image-retrieval']['pre_extracted_img_features_root']
     use_precomputed_img_embeddings = config['image-retrieval']['use_precomputed_img_embeddings']
 
-    if dataset_name == 'coco':
-        # get the directories that contain the coco json files and coco annotation ids (which we may not need, I think)
-        roots, coco_annotation_ids = get_paths(config)
+    if dataset_name == 'coco' or dataset_name == 'f30k':
+        # get the directories that contain the coco/f30k json files and coco/f30k annotation ids
+        roots, annotation_ids = get_paths(config)
 
         imgs_root = roots[split_name]['img']
-
         captions_json = roots[split_name]['cap']
-        coco_annotation_ids = coco_annotation_ids[split_name]
+        annotation_ids = annotation_ids[split_name]
+        flickr_sizes_pkl = os.path.join(roots['train']['img'], 'sizes.pkl')  # ignore 'train' key. same for all splits
+        flickr_dataset_json = roots['train']['cap']  # ignore 'train' key. same for all splits
+
         if use_precomputed_img_embeddings:
+            if dataset_name == 'coco':
+                dataset = PreComputedCocoImageEmbeddingsDataset(captions_json=captions_json,
+                                                                coco_annotation_ids=annotation_ids,
+                                                                config=config,
+                                                                num_workers=num_workers)
+            else:  # dataset_name == 'f30k':
+                dataset = PreComputedFlickrImageEmbeddingsDataset(dataset_json=flickr_dataset_json,  # see get_paths()
+                                                                  sizes_pkl=flickr_sizes_pkl,
+                                                                  config=config,
+                                                                  num_workers=num_workers)
+
             # We're not using a dataloader for precomputed image embeddings
-            dataset = PreComputedCocoImageEmbeddingsDataset(captions_json=captions_json,
-                                                            coco_annotation_ids=coco_annotation_ids,
-                                                            config=config,
-                                                            num_workers=num_workers)
             return dataset
         else:
-            dataset = PreComputedCocoFeaturesDataset(imgs_root=imgs_root,
-                                                     img_features_path=pre_extracted_img_features_root,
-                                                     captions_json=captions_json,
-                                                     coco_annotation_ids=coco_annotation_ids,
-                                                     query=query)
+            if dataset_name == 'coco':
+                dataset = PreComputedCocoFeaturesDataset(imgs_root=imgs_root,
+                                                         img_features_path=pre_extracted_img_features_root,
+                                                         captions_json=captions_json,
+                                                         coco_annotation_ids=annotation_ids,
+                                                         query=query)
+            else:  # dataset_name == 'f30k':
+                dataset = PreComputedFlickrFeaturesDataset(img_features_path=pre_extracted_img_features_root,
+                                                           dataset_json=flickr_dataset_json,  # see get_paths()
+                                                           sizes_pkl=flickr_sizes_pkl,
+                                                           query=query)
+
     elif dataset_name == 'wicsmmir':
         dataframe_file = config['dataset'][f'{split_name}_set']
         dataset = WICSMMIRImageRetrievalDataset(features_root=config['dataset']['features_root'],
                                                 dataframe_file=dataframe_file,
                                                 query=query)
     else:
-        raise NotImplementedError("Currently only COCO and WICSMMIR are supported!")
+        raise NotImplementedError("Currently only COCO, Flickr30k, and WICSMMIR are supported!")
 
     # this creates the batches which get passed to the model (inside the query gets repeated or not based on the config)
     collate_fn = InferenceCollate(config, pre_compute_img_embs)
