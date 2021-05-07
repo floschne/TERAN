@@ -295,28 +295,30 @@ class CocoImageRetrievalDatasetBase:
 
 
 class FlickrImageRetrievalDatasetBase:
-    def __init__(self, dataset_json: str, sizes_pkl: str):
-        with open(sizes_pkl, 'rb') as f:
-            sizes = pickle.load(f)
+    """
+    Since there no information is provided by the TERAN author where to get the images from, and our datasource (Kaggle)
+    has 1) a different number of images and 2) different image IDs and most probably 3) different orderings of captions,
+    we have have to use a custom torch Dataset with our information and extracted feats.
+    """
 
-        with open(dataset_json, 'r') as f:
-            ds = jsonmod.load(f)['images']
+    def __init__(self, dataframe: str):
+        # contains all captions too (so the lengths is 5 times the number of images)
+        self.dataframe = pd.read_feather(dataframe)
 
-        self.images = []
-        for idx, i in enumerate(ds):
-            i['width'] = sizes[idx][0]
-            i['height'] = sizes[idx][1]
-            self.images.append(i)
-
-    def get_image_metadata(self, idx):
+    def get_image_id(self, idx):
         """
-        returns the idx'ths image metadata
+        returns the idx'th image id
         """
-        metadata = self.images[idx]
-        return metadata['imgid'], metadata
+        # every 5th idx is a new image id since every image relates to 5 captions
+        return self.dataframe.iloc[idx * 5]['image_id']
+
+    def get_image_ids(self, indices):
+        # every 5th idx is a new image id since every image relates to 5 captions
+        return [self.get_image_id(idx) for idx in indices]
 
     def __len__(self):
-        return len(self.images)
+        # contains all captions too (so the lengths is 5 times the number of images)
+        return len(self.dataframe) // 5
 
 
 class PreComputedFlickrFeaturesDataset(FlickrImageRetrievalDatasetBase, data.Dataset):
@@ -325,35 +327,41 @@ class PreComputedFlickrFeaturesDataset(FlickrImageRetrievalDatasetBase, data.Dat
     Compatible with torch.utils.data.DataLoader.
     """
 
-    def __init__(self, img_features_path: str, dataset_json: str, sizes_pkl: str, query: str):
-        FlickrImageRetrievalDatasetBase.__init__(self, dataset_json, sizes_pkl)
+    def __init__(self, config, query: str):
+        FlickrImageRetrievalDatasetBase.__init__(self, config['dataset']['complete-dataset'])
 
-        self.feats_data_path = os.path.join(img_features_path, 'bu_att')
-        self.box_data_path = os.path.join(img_features_path, 'bu_box')
+        self.img_features_path = config['image-retrieval']['pre_extracted_img_features_root']
         self.query = query
+
+    def _load_features(self, idx):
+        img_id = str(self.get_image_id(idx))
+        # replace the .jpg from image id
+        img_id = img_id.replace('.jpg', '')
+        img_feat_fn = os.path.join(self.img_features_path, f"{img_id}.npz")
+
+        feat_npz = np.load(img_feat_fn, allow_pickle=True)
+        bua_feats = feat_npz['x']  # shape: (36, 2048) --> currently fixed to 36 rois
+        bua_bboxes = feat_npz['bbox']  # shape: (36, 4)
+        img_size = (feat_npz['image_w'], feat_npz['image_h'])  # Tuple[int, int]
+
+        # normalize box (see BottomUpFeaturesDataset)
+        bua_bboxes = bua_bboxes / np.tile(img_size, 2)
+
+        bua_feats = torch.Tensor(bua_feats)
+        bua_bboxes = torch.Tensor(bua_bboxes)
+
+        return bua_feats, bua_bboxes
 
     def __getitem__(self, idx):
         """
         This function returns a tuple that is further passed to collate_fn
         """
-        img_id, img_metadata = self.get_image_metadata(idx)
-        img_size = np.array([img_metadata['width'], img_metadata['height']])
-
-        img_feat_path = os.path.join(self.feats_data_path, '{}.npz'.format(img_id))
-        img_box_path = os.path.join(self.box_data_path, '{}.npy'.format(img_id))
-
-        img_feat = np.load(img_feat_path)['feat']
-        img_feat_box = np.load(img_box_path)
-
-        # normalize box
-        img_feat_box = img_feat_box / np.tile(img_size, 2)
-
-        img_feat = torch.Tensor(img_feat)
-        img_feat_box = torch.Tensor(img_feat_box)
+        bua_feats, bua_bboxes = self._load_features(idx)
+        img_id = str(self.get_image_id(idx))
 
         # we always return the query here since we want to compute the similarity of each image with the query
         # this output is the input of the InferenceCollate function
-        return img_feat, img_feat_box, img_id, self.query, idx
+        return bua_feats, bua_bboxes, img_id, self.query, idx
 
 
 # This has to be outside any class so that it can be pickled for multiproc
@@ -435,7 +443,7 @@ class PreComputedImageEmbeddingsData:
         print(f'Loading {len(self.__file_names)} image embeddings took {time.time() - start} seconds')
 
     # noinspection PyUnresolvedReferences
-    def get_subset(self, image_ids: List[str], pre_fetch_in_memory: bool = False): #-> PreComputedImageEmbeddingsData:
+    def get_subset(self, image_ids: List[str], pre_fetch_in_memory: bool = False):  # -> PreComputedImageEmbeddingsData:
         """
         Returns a subset containing the image embeddings for all ids in image_ids
         :param image_ids: list of image ids
@@ -510,14 +518,13 @@ class PreComputedFlickrImageEmbeddingsDataset(FlickrImageRetrievalDatasetBase, P
     Custom Flickr30k Dataset that uses pre-computed image embedding
     """
 
-    def __init__(self, dataset_json: str, sizes_pkl: str, config, num_workers=32):
-        FlickrImageRetrievalDatasetBase.__init__(self, dataset_json=dataset_json, sizes_pkl=sizes_pkl)
+    def __init__(self, config, num_workers=32):
+        FlickrImageRetrievalDatasetBase.__init__(self, dataframe=config['dataset']['complete-dataset'])
+        self.pre_computed_img_embeddings_root = config['image-retrieval']['pre_computed_img_embeddings_root']
         PreComputedImageEmbeddingsData.__init__(self,
-                                                config['image-retrieval']['pre_computed_img_embeddings_root'],
+                                                self.pre_computed_img_embeddings_root,
                                                 pre_fetch_in_memory=True,
                                                 num_pre_fetch_workers=num_workers)
-
-        self.pre_computed_img_embeddings_root = config['image-retrieval']['pre_computed_img_embeddings_root']
 
     def __len__(self):
         return PreComputedImageEmbeddingsData.__len__(self)
@@ -1046,15 +1053,13 @@ def get_image_retrieval_data(config, query=None, num_workers=32, pre_compute_img
     pre_extracted_img_features_root = config['image-retrieval']['pre_extracted_img_features_root']
     use_precomputed_img_embeddings = config['image-retrieval']['use_precomputed_img_embeddings']
 
-    if dataset_name == 'coco' or dataset_name == 'f30k':
+    if dataset_name == 'coco':
         # get the directories that contain the coco/f30k json files and coco/f30k annotation ids
         roots, annotation_ids = get_paths(config)
 
         imgs_root = roots[split_name]['img']
         captions_json = roots[split_name]['cap']
         annotation_ids = annotation_ids[split_name]
-        flickr_sizes_pkl = os.path.join(roots['train']['img'], 'sizes.pkl')  # ignore 'train' key. same for all splits
-        flickr_dataset_json = roots['train']['cap']  # ignore 'train' key. same for all splits
 
         if use_precomputed_img_embeddings:
             if dataset_name == 'coco':
@@ -1062,14 +1067,8 @@ def get_image_retrieval_data(config, query=None, num_workers=32, pre_compute_img
                                                                 coco_annotation_ids=annotation_ids,
                                                                 config=config,
                                                                 num_workers=num_workers)
-            else:  # dataset_name == 'f30k':
-                dataset = PreComputedFlickrImageEmbeddingsDataset(dataset_json=flickr_dataset_json,  # see get_paths()
-                                                                  sizes_pkl=flickr_sizes_pkl,
-                                                                  config=config,
-                                                                  num_workers=num_workers)
-
-            # We're not using a dataloader for precomputed image embeddings
-            return dataset
+                # We're not using a dataloader for precomputed image embeddings
+                return dataset
         else:
             if dataset_name == 'coco':
                 dataset = PreComputedCocoFeaturesDataset(imgs_root=imgs_root,
@@ -1077,17 +1076,14 @@ def get_image_retrieval_data(config, query=None, num_workers=32, pre_compute_img
                                                          captions_json=captions_json,
                                                          coco_annotation_ids=annotation_ids,
                                                          query=query)
-            else:  # dataset_name == 'f30k':
-                dataset = PreComputedFlickrFeaturesDataset(img_features_path=pre_extracted_img_features_root,
-                                                           dataset_json=flickr_dataset_json,  # see get_paths()
-                                                           sizes_pkl=flickr_sizes_pkl,
-                                                           query=query)
 
     elif dataset_name == 'wicsmmir':
         dataframe_file = config['dataset'][f'{split_name}_set']
         dataset = WICSMMIRImageRetrievalDataset(features_root=config['dataset']['features_root'],
                                                 dataframe_file=dataframe_file,
                                                 query=query)
+    elif dataset_name == 'f30k':
+        dataset = PreComputedFlickrFeaturesDataset(config=config, query=query)
     else:
         raise NotImplementedError("Currently only COCO, Flickr30k, and WICSMMIR are supported!")
 

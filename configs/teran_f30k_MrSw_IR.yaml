@@ -1,19 +1,20 @@
 dataset:
   name: 'f30k'
-  images-path: 'data/f30k/images'  # needed for sizes.pkl
+  complete-dataset: 'data/f30k/f30k_raw.df.feather'
+  images-path: ''  # not needed since we load our own flickr30 data
   data: 'data'
   restval: True
   pre-extracted-features: False
 
 image-retrieval:
   dataset: 'f30k'
-  split: 'train' # this is only necessary due to original TERAN code.. gets ignored in our code
   batch_size: 100 # 100 takes ~10s; 1000 takes ~14s to encode the data (compute the TE outputs)
-  pre_extracted_img_features_root: 'data/f30k/features_36'
+  pre_extracted_img_features_root: 'data/f30k/features_36/bua'
   create_query_batch: False
   alignment_mode: 'MrSw'
   use_precomputed_img_embeddings: False
   pre_computed_img_embeddings_root: 'data/f30k/pre_computed_embeddings'
+  split: ''
 
 text-model:
   name: 'bert'

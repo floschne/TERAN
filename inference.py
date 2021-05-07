@@ -167,16 +167,15 @@ def get_image_ids(dataset_indices, dataloader) -> List[str]:
         imgs = dataloader.dataset.dataframe.iloc[dataset_indices]['wikicaps_id'].to_numpy().tolist()
         return [str(i) for i in imgs]
 
-    # COCO and F30k
+    # COCO
     if isinstance(dataloader.dataset, CocoImageRetrievalDatasetBase):
         return [build_coco_img_id(dataloader.dataset.get_image_metadata(idx)[0]) for idx in dataset_indices]
     elif isinstance(dataloader, CocoImageRetrievalDatasetBase):
         return [build_coco_img_id(dataloader.get_image_metadata(idx)[0]) for idx in dataset_indices]
 
     # F30k
-    if isinstance(dataloader.dataset, FlickrImageRetrievalDatasetBase) or \
-            isinstance(dataloader, FlickrImageRetrievalDatasetBase):
-        return [str(idx) for idx in dataset_indices]  # in F30k the image_ids are simply counts from 0..len(f30k)
+    if isinstance(dataloader.dataset, FlickrImageRetrievalDatasetBase):
+        return dataloader.dataset.get_image_ids(dataset_indices)
     else:
         raise NotImplementedError("Only COCO, F30k, and WICSMMIR are supported!")
 
