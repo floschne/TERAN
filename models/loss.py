@@ -90,7 +90,7 @@ class AlignmentContrastiveLoss(Contrastive):
 
         # do not consider cls and eos tokens
         im_set = im_set[:, 1:, :]
-        s_seq = s_seq[:, 1:-2, :]
+        s_seq = s_seq[:, 1:-2, :]  # FIXME this is most probably a bug! there is no EOS token but only a SEP token...
         im_len = [l - 1 for l in im_len]
         s_len = [l - 3 for l in s_len]
 

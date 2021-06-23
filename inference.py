@@ -2,17 +2,18 @@ import argparse
 import os
 import sys
 import time
-from pathlib import Path
-from typing import List
 
 import numpy as np
 import torch
 import yaml
+from pathlib import Path
+from tqdm import tqdm, trange
+from transformers import BertTokenizer
+from typing import List
+
 # noinspection PyUnresolvedReferences
 from data import get_image_retrieval_data, QueryEncoder, WICSMMIRImageRetrievalDataset, CocoImageRetrievalDatasetBase, \
     FlickrImageRetrievalDatasetBase
-from tqdm import tqdm, trange
-
 from models.loss import AlignmentContrastiveLoss
 from models.teran import TERAN
 from utils import AverageMeter, LogCollector
@@ -103,6 +104,10 @@ def encode_data_for_inference(model: TERAN, data_loader, log_step=10, logging=pr
     return img_embs, query_embs, num_img_feats, num_query_feats
 
 
+def get_tokenizer(config) -> BertTokenizer:
+    return BertTokenizer.from_pretrained(config['text-model']['pretrain'])
+
+
 def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config, return_wra_matrices=True):
     # initialize similarity matrix evaluator
     sim_matrix_fn = AlignmentContrastiveLoss(aggregation=config['image-retrieval']['alignment_mode'],
@@ -140,7 +145,8 @@ def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config, 
         img_embs_batch.cuda()
 
         # compute and pool the similarity matrices to get the global distance between the image and the query
-        alignment_distance, alignment_matrix = sim_matrix_fn(img_embs_batch, query_emb_batch, img_embs_length_batch, query_length_batch)
+        alignment_distance, alignment_matrix = sim_matrix_fn(img_embs_batch, query_emb_batch, img_embs_length_batch,
+                                                             query_length_batch)
         alignment_distance = alignment_distance.t().cpu().numpy()
         # store the distances
         if distances is None:
@@ -161,6 +167,7 @@ def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config, 
         return distances.squeeze(), matrices
     else:
         return distances.squeeze()
+
 
 # TODO hardcoded is ugly and this is actually not mentioned anywhere due to laziness...
 def build_coco_img_id(coco_id: int, prefix: str = 'COCO_'):
