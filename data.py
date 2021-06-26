@@ -96,7 +96,7 @@ class WICSMMIRDatasetBase:
                  shuffle: bool = True,
                  random_seed: int = 1312):
         self.features_root = Path(features_root)
-        assert self.features_root.exists()
+        assert self.features_root.exists(), f"Cannot read features root: {self.features_root}"
 
         self.dataframe = pd.read_feather(dataframe_file, use_threads=True, columns=load_columns)
         if shuffle:
@@ -460,9 +460,11 @@ class PreComputedImageEmbeddingsData:
                                                 pool=self.pool,
                                                 subset=True)
         if len(self.img_embs) != 0:
+            # embs are already in memory
             subset.img_embs = {img_id: self.img_embs[img_id] for img_id in image_ids}
             assert len(subset.img_embs) == len(subset) == len(image_ids)
         elif pre_fetch_in_memory:
+            # embs are already in memory
             subset.fetch_img_embs()
         return subset
 
