@@ -1,13 +1,16 @@
 import argparse
 import os
+import resource
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from itertools import repeat
 
 import numpy as np
 import torch
 import yaml
 from pathlib import Path
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from transformers import BertTokenizer
 from typing import List
 
@@ -19,21 +22,27 @@ from models.teran import TERAN
 from utils import AverageMeter, LogCollector
 
 
-def persist_img_embs(config, data_loader, dataset_indices, numpy_img_emb):
+def persist_img_embs(config, data_loader, dataset_indices, numpy_img_emb, pool):
     dst_root = Path(os.getcwd()).joinpath(config['image-retrieval']['pre_computed_img_embeddings_root'])
     if not dst_root.exists():
         dst_root.mkdir(parents=True, exist_ok=True)
 
     assert len(dataset_indices) == len(numpy_img_emb)
     img_ids = get_image_ids(dataset_indices, data_loader)
+
+    futures = []
     for idx in range(len(img_ids)):
         dst = dst_root.joinpath(img_ids[idx] + '.npz')
         if dst.exists():
             continue
-        np.savez_compressed(str(dst), img_emb=numpy_img_emb[idx])
+        futures.append(pool.submit(np.savez_compressed, file=str(dst), img_emb=numpy_img_emb[idx]))
+
+    for f in as_completed(futures):
+        pass
 
 
-def encode_data_for_inference(model: TERAN, data_loader, log_step=10, logging=print, pre_compute_img_embs=False):
+def encode_data_for_inference(model: TERAN, data_loader, log_step=10, logging=print, pre_compute_img_embs=False,
+                              persist_pool=None):
     # compute the embedding vectors v_i, s_j (paper) for each image region and word respectively
     # -> forwarding the data through the respective TE stacks
     print(
@@ -89,7 +98,7 @@ def encode_data_for_inference(model: TERAN, data_loader, log_step=10, logging=pr
             img_embs[dataset_indices, :, :] = numpy_img_emb
             if pre_compute_img_embs:
                 # if we are in a pre-compute run, persist the arrays
-                persist_img_embs(model_config, data_loader, dataset_indices, numpy_img_emb)
+                persist_img_embs(model_config, data_loader, dataset_indices, numpy_img_emb, persist_pool)
 
         # measure elapsed time per batch
         batch_time.update(time.time() - batch_start_time)
@@ -108,7 +117,25 @@ def get_tokenizer(config) -> BertTokenizer:
     return BertTokenizer.from_pretrained(config['text-model']['pretrain'])
 
 
-def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config, return_wra_matrices=True):
+def compute_distance_task(sim_matrix_fn, img_embs_batch, query_emb_batch, img_embs_length_batch, query_length_batch):
+    # compute and pool the similarity matrices to get the global distance between the image and the query
+    alignment_distance, alignment_matrix = sim_matrix_fn(img_embs_batch, query_emb_batch, img_embs_length_batch,
+                                                         query_length_batch)
+
+    return alignment_distance, alignment_matrix
+
+
+def compute_distances(img_embs,
+                      query_embs,
+                      img_lengths,
+                      query_lengths,
+                      config,
+                      return_wra_matrices=True,
+                      dist_pool=None):
+    # necessary for multi processing many files / objects
+    rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (16384, rlimit[1]))
+
     # initialize similarity matrix evaluator
     sim_matrix_fn = AlignmentContrastiveLoss(aggregation=config['image-retrieval']['alignment_mode'],
                                              return_aggregated_similarity_mat=True,
@@ -134,39 +161,63 @@ def compute_distances(img_embs, query_embs, img_lengths, query_lengths, config, 
     # (TODO maybe we can even just use a batch of size 1?! -> check the sim_matrix_fn)
     query_emb_batch = query_embs[:1]
     query_length_batch = [query_lengths[0] if isinstance(query_lengths, list) else query_lengths for _ in range(1)]
-    query_emb_batch.cuda()
 
     start_time = time.time()
     # batch-wise compute the alignment distance between the images and the query
-    for i in trange(img_emb_batches, desc='Computing distances...'):
-        # create the current batch
-        img_embs_batch = img_embs[i * img_embs_per_batch[i]:(i + 1) * img_embs_per_batch[i]]
-        img_embs_length_batch = [img_lengths for _ in range(img_embs_per_batch[i])]
-        img_embs_batch.cuda()
+    with tqdm(total=img_emb_batches, desc='Computing distances...') as pbar:
+        img_embs_batches = []
+        img_embs_length_batches = []
+        for i in range(img_emb_batches):
+            # get the current batch
+            img_embs_batch = img_embs[i * img_embs_per_batch[i]:(i + 1) * img_embs_per_batch[i]]
+            img_embs_batches.append(img_embs_batch)
+            img_embs_length_batch = [img_lengths for _ in range(img_embs_per_batch[i])]
+            img_embs_length_batches.append(img_embs_length_batch)
 
-        # compute and pool the similarity matrices to get the global distance between the image and the query
-        alignment_distance, alignment_matrix = sim_matrix_fn(img_embs_batch, query_emb_batch, img_embs_length_batch,
-                                                             query_length_batch)
-        alignment_distance = alignment_distance.t().cpu().numpy()
-        # store the distances
-        if distances is None:
-            distances = alignment_distance
+        # # compute and pool the similarity matrices to get the global distance between the image and the query
+
+        # compute in parallel if worker pool is provided # todo use ray
+        if dist_pool is not None:
+            # !!! we have to use
+            # map here to preserve the ordering so that the indices match the image ids !!!
+            dists = dist_pool.map(compute_distance_task,
+                                  repeat(sim_matrix_fn),
+                                  img_embs_batches,
+                                  repeat(query_emb_batch),
+                                  img_embs_length_batches,
+                                  repeat(query_length_batch))
         else:
-            distances = np.concatenate([distances, alignment_distance], axis=1)
+            # compute serially
+            dists = [compute_distance_task(sim_matrix_fn,
+                                           img_emb_batch,
+                                           query_emb_batch,
+                                           img_emb_batch_len,
+                                           query_length_batch)
+                     for img_emb_batch, img_emb_batch_len in zip(img_embs_batches, img_embs_length_batches)]
 
-        if return_wra_matrices:
-            alignment_matrix = alignment_matrix.squeeze().cpu().numpy()
-            # store matrices
-            if matrices is None:
-                matrices = alignment_matrix
+        for alignment_distance, alignment_matrix in dists:
+            alignment_distance = alignment_distance.squeeze().numpy()
+            alignment_matrix = alignment_matrix.squeeze().numpy()
+
+            # store the distances
+            if distances is None:
+                distances = alignment_distance
             else:
-                matrices = np.concatenate([matrices, alignment_matrix], axis=0)
+                distances = np.concatenate([distances, alignment_distance], axis=0)
+
+            if return_wra_matrices:
+                # store matrices
+                if matrices is None:
+                    matrices = alignment_matrix
+                else:
+                    matrices = np.concatenate([matrices, alignment_matrix], axis=0)
+            pbar.update(1)
 
     print(f"Time elapsed to compute and pool the similarity matrices: {time.time() - start_time} seconds.")
     if return_wra_matrices:
-        return distances.squeeze(), matrices
+        return distances, matrices
     else:
-        return distances.squeeze()
+        return distances
 
 
 # TODO hardcoded is ugly and this is actually not mentioned anywhere due to laziness...
@@ -280,8 +331,9 @@ def pre_compute_img_embeddings(opts, config, checkpoint):
                                            query=opts.query,
                                            num_workers=opts.num_data_workers,
                                            pre_compute_img_embs=True)
-    # encode the data (i.e. compute the embeddings / TE outputs for the images and query)
-    encode_data_for_inference(model, data_loader, pre_compute_img_embs=True)
+    with ProcessPoolExecutor(max_workers=32) as persist_pool:
+        # encode the data (i.e. compute the embeddings / TE outputs for the images and query)
+        encode_data_for_inference(model, data_loader, pre_compute_img_embs=True, persist_pool=persist_pool)
 
 
 if __name__ == '__main__':
