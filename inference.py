@@ -12,7 +12,7 @@ import yaml
 from pathlib import Path
 from tqdm import tqdm
 from transformers import BertTokenizer
-from typing import List
+from typing import List, Tuple, Union
 
 # noinspection PyUnresolvedReferences
 from data import get_image_retrieval_data, QueryEncoder, WICSMMIRImageRetrievalDataset, CocoImageRetrievalDatasetBase, \
@@ -117,12 +117,17 @@ def get_tokenizer(config) -> BertTokenizer:
     return BertTokenizer.from_pretrained(config['text-model']['pretrain'])
 
 
-def compute_distance_task(sim_matrix_fn, img_embs_batch, query_emb_batch, img_embs_length_batch, query_length_batch):
+def compute_distance_task(sim_matrix_fn, img_embs_batch, query_emb_batch, img_embs_length_batch, query_length_batch) -> \
+        Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
     # compute and pool the similarity matrices to get the global distance between the image and the query
-    alignment_distance, alignment_matrix = sim_matrix_fn(img_embs_batch, query_emb_batch, img_embs_length_batch,
-                                                         query_length_batch)
-
-    return alignment_distance, alignment_matrix
+    distances = sim_matrix_fn(img_embs_batch, query_emb_batch, img_embs_length_batch, query_length_batch)
+    # if return_wra_matrix is true, the sim func returns tuples of <distance, wra_matrix>
+    if type(distances) == tuple:
+        alignment_distance, alignment_matrix = distances
+        return alignment_distance, alignment_matrix
+    else:
+        alignment_distance = distances
+        return alignment_distance
 
 
 def compute_distances(img_embs,
@@ -139,7 +144,7 @@ def compute_distances(img_embs,
     # initialize similarity matrix evaluator
     sim_matrix_fn = AlignmentContrastiveLoss(aggregation=config['image-retrieval']['alignment_mode'],
                                              return_aggregated_similarity_mat=True,
-                                             return_alignment_mat=True)
+                                             return_alignment_mat=return_wra_matrices)
 
     img_embs_per_batch = config['image-retrieval']['batch_size']
     num_imgs = img_embs.size(0)
@@ -180,25 +185,35 @@ def compute_distances(img_embs,
         if dist_pool is not None:
             # !!! we have to use
             # map here to preserve the ordering so that the indices match the image ids !!!
-            dists = dist_pool.map(compute_distance_task,
-                                  repeat(sim_matrix_fn),
-                                  img_embs_batches,
-                                  repeat(query_emb_batch),
-                                  img_embs_length_batches,
-                                  repeat(query_length_batch))
+            if len(img_embs_length_batches) > 1000:
+                cs = len(img_embs_length_batches) // 32
+            dists = list(tqdm(dist_pool.map(compute_distance_task,
+                                            repeat(sim_matrix_fn),
+                                            img_embs_batches,
+                                            repeat(query_emb_batch),
+                                            img_embs_length_batches,
+                                            repeat(query_length_batch), chunksize=cs), total=len(img_embs_batches)))
         else:
             # compute serially
-            dists = [compute_distance_task(sim_matrix_fn,
-                                           img_emb_batch,
-                                           query_emb_batch,
-                                           img_emb_batch_len,
-                                           query_length_batch)
-                     for img_emb_batch, img_emb_batch_len in zip(img_embs_batches, img_embs_length_batches)]
+            dists = []
+            for img_emb_batch, img_emb_batch_len in zip(img_embs_batches, img_embs_length_batches):
+                dist = compute_distance_task(sim_matrix_fn,
+                                             img_emb_batch,
+                                             query_emb_batch,
+                                             img_emb_batch_len,
+                                             query_length_batch)
+                dists.append(dist)
+                pbar.update(1)
 
-        for alignment_distance, alignment_matrix in dists:
+        for d in dists:
+            # if return_wra_matrices, the elements of dists pairs of <distances, wra_matries>
+            # else only the distances are returned
+            if return_wra_matrices:
+                alignment_distance = d[0]
+            else:
+                alignment_distance = d
+
             alignment_distance = alignment_distance.squeeze().numpy()
-            alignment_matrix = alignment_matrix.squeeze().numpy()
-
             # store the distances
             if distances is None:
                 distances = alignment_distance
@@ -206,12 +221,13 @@ def compute_distances(img_embs,
                 distances = np.concatenate([distances, alignment_distance], axis=0)
 
             if return_wra_matrices:
+                alignment_matrix = d[1]
+                alignment_matrix = alignment_matrix.squeeze().numpy()
                 # store matrices
                 if matrices is None:
                     matrices = alignment_matrix
                 else:
                     matrices = np.concatenate([matrices, alignment_matrix], axis=0)
-            pbar.update(1)
 
     print(f"Time elapsed to compute and pool the similarity matrices: {time.time() - start_time} seconds.")
     if return_wra_matrices:
